@@ -23,7 +23,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2 fastcgi/);
+my $t = Test::Nginx->new()->has(qw/http http_v2 fastcgi/)->plan(48);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -38,8 +38,10 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         server_name  localhost;
+
+        http2 on;
 
         location / {
             fastcgi_request_buffering off;
@@ -53,7 +55,6 @@ http {
 EOF
 
 $t->run();
-$t->plan(48);
 
 ###############################################################################
 

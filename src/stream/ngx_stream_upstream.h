@@ -21,10 +21,12 @@
 #define NGX_STREAM_UPSTREAM_FAIL_TIMEOUT  0x0008
 #define NGX_STREAM_UPSTREAM_DOWN          0x0010
 #define NGX_STREAM_UPSTREAM_BACKUP        0x0020
+#define NGX_STREAM_UPSTREAM_MODIFY        0x0040
 #define NGX_STREAM_UPSTREAM_MAX_CONNS     0x0100
 
 
 #define NGX_STREAM_UPSTREAM_NOTIFY_CONNECT     0x1
+#define NGX_STREAM_UPSTREAM_NOTIFY_FIRST_BYTE  0x2
 
 
 typedef struct {
@@ -62,8 +64,10 @@ typedef struct {
 
     unsigned                           backup:1;
 
-    NGX_COMPAT_BEGIN(4)
-    NGX_COMPAT_END
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    ngx_str_t                          host;
+    ngx_str_t                          service;
+#endif
 } ngx_stream_upstream_server_t;
 
 
@@ -83,6 +87,8 @@ struct ngx_stream_upstream_srv_conf_s {
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     ngx_shm_zone_t                    *shm_zone;
+    ngx_resolver_t                    *resolver;
+    ngx_msec_t                         resolver_timeout;
 #endif
 };
 
@@ -95,6 +101,9 @@ typedef struct {
     off_t                              bytes_received;
 
     ngx_str_t                         *peer;
+
+    NGX_COMPAT_BEGIN(2)
+    NGX_COMPAT_END
 } ngx_stream_upstream_state_t;
 
 
@@ -141,7 +150,8 @@ typedef struct {
     ngx_stream_upstream_resolved_t    *resolved;
     ngx_stream_upstream_state_t       *state;
     unsigned                           connected:1;
-    unsigned                           proxy_protocol:1;
+    unsigned                           proxy_protocol:2;
+    unsigned                           half_closed:1;
 
 #if (T_NGX_MULTI_UPSTREAM)
     unsigned                           multi:1;
@@ -155,6 +165,16 @@ ngx_stream_upstream_srv_conf_t *ngx_stream_upstream_add(ngx_conf_t *cf,
 
 #define ngx_stream_conf_upstream_srv_conf(uscf, module)                       \
     uscf->srv_conf[module.ctx_index]
+
+
+#if (NGX_STREAM_UPSTREAM_CHECK)
+
+ngx_uint_t ngx_stream_upstream_check_add_peer(ngx_conf_t *cf,
+    ngx_stream_upstream_srv_conf_t *us, ngx_addr_t *peer);
+
+ngx_uint_t ngx_stream_upstream_check_peer_down(ngx_uint_t index);
+
+#endif
 
 
 extern ngx_module_t  ngx_stream_upstream_module;

@@ -20,8 +20,8 @@
 
 
 typedef struct {
-    ngx_flag_t       enable;
     ngx_flag_t       prefer_server_ciphers;
+    ngx_flag_t       certificate_compression;
 
     ngx_ssl_t        ssl;
 
@@ -48,6 +48,7 @@ typedef struct {
     ngx_str_t        ciphers;
 
     ngx_array_t     *passwords;
+    ngx_array_t     *conf_commands;
 
     ngx_shm_zone_t  *shm_zone;
 

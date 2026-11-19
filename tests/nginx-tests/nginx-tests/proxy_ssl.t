@@ -21,16 +21,13 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-eval { require IO::Socket::SSL; };
-plan(skip_all => 'IO::Socket::SSL not installed') if $@;
-
-my $t = Test::Nginx->new()->has(qw/http proxy http_ssl/)->has_daemon('openssl')
-	->plan(7)->write_file_expand('nginx.conf', <<'EOF');
+my $t = Test::Nginx->new()->has(qw/http proxy http_ssl socket_ssl/)
+	->has_daemon('openssl')->plan(8)
+	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
 
 daemon off;
-worker_processes 1;
 
 events {
 }
@@ -47,6 +44,7 @@ http {
 
         location / {
             add_header X-Session $ssl_session_reused;
+            add_header X-Protocol $ssl_protocol;
         }
     }
 
@@ -80,12 +78,13 @@ EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]
 EOF
 
+$t->write_file('big.html', 'xxxxxxxxxx' x 72000);
 $t->write_file('index.html', '');
 
 my $d = $t->testdir();
@@ -109,8 +108,15 @@ $t->waitforsocket('127.0.0.1:' . port(8083));
 like(http_get('/ssl'), qr/200 OK.*X-Session: \./s, 'ssl');
 like(http_get('/ssl'), qr/200 OK.*X-Session: \./s, 'ssl 2');
 like(http_get('/ssl_reuse'), qr/200 OK.*X-Session: \./s, 'ssl session new');
+
+TODO: {
+local $TODO = 'no TLS 1.3 sessions in LibreSSL'
+	if $t->has_module('LibreSSL') && http_get('/ssl') =~ /TLSv1.3/;
+
 like(http_get('/ssl_reuse'), qr/200 OK.*X-Session: r/s, 'ssl session reused');
 like(http_get('/ssl_reuse'), qr/200 OK.*X-Session: r/s, 'ssl session reused 2');
+
+}
 
 SKIP: {
 skip 'long test', 1 unless $ENV{TEST_NGINX_UNSAFE};
@@ -120,6 +126,9 @@ like(http_get('/timeout'), qr/200 OK/, 'proxy connect timeout');
 }
 
 like(http_get('/timeout_h'), qr/504 Gateway/, 'proxy handshake timeout');
+
+is(length(Test::Nginx::http_content(http_get('/ssl/big.html'))), 720000,
+	'big length');
 
 ###############################################################################
 

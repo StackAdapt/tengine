@@ -24,11 +24,8 @@ use Test::Nginx qw/ :DEFAULT http_end /;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-eval { require IO::Socket::SSL; };
-plan(skip_all => 'IO::Socket::SSL not installed') if $@;
-
-my $t = Test::Nginx->new()->has(qw/stream stream_ssl/)->has_daemon('openssl')
-	->plan(2);
+my $t = Test::Nginx->new()->has(qw/stream stream_ssl socket_ssl/)
+	->has_daemon('openssl')->plan(2);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -40,6 +37,8 @@ events {
 }
 
 stream {
+    %%TEST_GLOBALS_STREAM%%
+
     proxy_ssl       on;
     proxy_protocol  on;
 
@@ -59,7 +58,7 @@ EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]

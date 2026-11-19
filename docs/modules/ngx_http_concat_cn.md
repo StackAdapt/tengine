@@ -43,7 +43,7 @@
 
 **上下文:** `http, server, location`
 
-定义配置的[MIME types](http://en.wikipedia.org/wiki/MIME_type)以及 "application/x-javascript" 是可以被接受
+定义配置的[MIME types](https://en.wikipedia.org/wiki/MIME_type)以及 "application/x-javascript" 是可以被接受
 
 <br/>
 <br/>
@@ -100,11 +100,11 @@
 
  1. 编译concat模块
          
-    configure  [--with-http_concat_module | --with-http_concat_module=shared]
+    configure  [--add-module=modules/ngx_http_concat_module | --add-dynamic-module=modules/ngx_http_concat_module]
 
-    --with-http_concat_module选项，concat模块将被静态编译到tengine中
+    --add-module=modules/ngx_http_concat_module选项，concat模块将被静态编译到tengine中
 
-    --with-http_concat_module=shared,concat模块将被编译成动态文件，采用动态模块的方式添加到tengine中
+    --add-dynamic-module=modules/ngx_http_concat_module,concat模块将被编译成动态文件，采用动态模块的方式添加到tengine中
 
  2. 编译,安装
 

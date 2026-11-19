@@ -27,7 +27,7 @@ select STDOUT; $| = 1;
 eval { require GD; };
 plan(skip_all => 'GD not installed') if $@;
 
-my $t = Test::Nginx->new()->has(qw/http proxy map image_filter/)->plan(39)
+my $t = Test::Nginx->new()->has(qw/http proxy map image_filter/)->plan(40)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -56,6 +56,10 @@ http {
         location /size {
             image_filter size;
             alias %%TESTDIR%%/;
+        }
+        location /proxy_size {
+            proxy_pass http://127.0.0.1:8081/;
+            image_filter size;
         }
 
         location /test {
@@ -195,6 +199,13 @@ like(http_get('/size/jpeg'), qr/"type": "jpeg"/, 'size jpeg');
 like(http_get('/size/gif'), qr/"type": "gif"/, 'size gif');
 like(http_get('/size/png'), qr/"type": "png"/, 'size png');
 
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.31.4');
+
+is(http_get_body('/proxy_size/png/16'), '{}' . CRLF, 'size truncated');
+
+}
+
 is(gif_size('/resize/gif'), '10 12', 'resize');
 is(gif_size('/resize1/gif'), '10 12', 'resize 1');
 is(gif_size('/resize2/gif'), '10 12', 'resize 2');
@@ -212,7 +223,8 @@ is($im->interlaced, 0, 'gif interlaced off');
 is($im->transparent, 0, 'gif transparent white');
 
 SKIP: {
-skip 'broken libgd', 1 unless has_gdversion('2.1.0') or $ENV{TEST_NGINX_UNSAFE};
+skip 'broken/unknown libgd', 1
+	unless has_gdversion('2.1.0') or $ENV{TEST_NGINX_UNSAFE};
 
 $im = GD::Image->newFromGifData(http_get_body('/interlaced/gif'));
 is($im->interlaced, 1, 'gif interlaced on');
@@ -279,8 +291,9 @@ sub http_get_body {
 sub has_gdversion {
 	my ($need) = @_;
 
-	my $v_str = `gdlib-config --version 2>&1` or return 1;
-	($v_str) = $v_str =~ m!^([0-9.]+)! or return 1;
+	my $v_str = `gdlib-config --version 2>&1`
+		|| eval { GD::VERSION_STRING() } or return 0;
+	($v_str) = $v_str =~ m!^([0-9.]+)!m or return 0;
 	my @v = split(/\./, $v_str);
 	my ($n, $v);
 
@@ -324,7 +337,9 @@ sub http_daemon {
 
 		next if $headers eq '';
 		$uri = $1 if $headers =~ /^\S+\s+([^ ]+)\s+HTTP/i;
-		my $data = $t->read_file($uri);
+		my ($file, $size) = $uri =~ /(\w+)\/?(\d+)?/;
+		my $data = $t->read_file($file);
+		$data = substr($data, 0, $size) if $size;
 
 		print $client <<EOF;
 HTTP/1.1 200 OK

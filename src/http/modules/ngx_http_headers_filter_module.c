@@ -10,6 +10,11 @@
 #include <ngx_http.h>
 
 
+#define NGX_HTTP_HEADERS_INHERIT_OFF    0
+#define NGX_HTTP_HEADERS_INHERIT_ON     1
+#define NGX_HTTP_HEADERS_INHERIT_MERGE  2
+
+
 typedef struct ngx_http_header_val_s  ngx_http_header_val_t;
 
 typedef ngx_int_t (*ngx_http_set_header_pt)(ngx_http_request_t *r,
@@ -49,6 +54,8 @@ typedef struct {
     ngx_http_complex_value_t  *expires_value;
     ngx_array_t               *headers;
     ngx_array_t               *trailers;
+    ngx_uint_t                 headers_inherit;
+    ngx_uint_t                 trailers_inherit;
 } ngx_http_headers_conf_t;
 
 
@@ -97,6 +104,14 @@ static ngx_http_set_header_t  ngx_http_set_headers[] = {
 };
 
 
+static ngx_conf_enum_t  ngx_http_headers_inherit[] = {
+    { ngx_string("off"),   NGX_HTTP_HEADERS_INHERIT_OFF },
+    { ngx_string("on"),    NGX_HTTP_HEADERS_INHERIT_ON },
+    { ngx_string("merge"), NGX_HTTP_HEADERS_INHERIT_MERGE },
+    { ngx_null_string, 0 }
+};
+
+
 static ngx_command_t  ngx_http_headers_filter_commands[] = {
 
     { ngx_string("expires"),
@@ -122,6 +137,22 @@ static ngx_command_t  ngx_http_headers_filter_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_headers_conf_t, trailers),
       NULL },
+
+    { ngx_string("add_header_inherit"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
+                        |NGX_CONF_TAKE1,
+      ngx_conf_set_enum_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_headers_conf_t, headers_inherit),
+      &ngx_http_headers_inherit },
+
+    { ngx_string("add_trailer_inherit"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
+                        |NGX_CONF_TAKE1,
+      ngx_conf_set_enum_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_headers_conf_t, trailers_inherit),
+      &ngx_http_headers_inherit },
 
       ngx_null_command
 };
@@ -329,8 +360,7 @@ ngx_http_set_expires(ngx_http_request_t *r, ngx_http_headers_conf_t *conf)
     time_t               now, expires_time, max_age;
     ngx_str_t            value;
     ngx_int_t            rc;
-    ngx_uint_t           i;
-    ngx_table_elt_t     *e, *cc, **ccp;
+    ngx_table_elt_t     *e, *cc;
     ngx_http_expires_t   expires;
 
     expires = conf->expires;
@@ -363,6 +393,7 @@ ngx_http_set_expires(ngx_http_request_t *r, ngx_http_headers_conf_t *conf)
         }
 
         r->headers_out.expires = e;
+        e->next = NULL;
 
         e->hash = 1;
         ngx_str_set(&e->key, "Expires");
@@ -371,38 +402,29 @@ ngx_http_set_expires(ngx_http_request_t *r, ngx_http_headers_conf_t *conf)
     len = sizeof("Mon, 28 Sep 1970 06:00:00 GMT");
     e->value.len = len - 1;
 
-    ccp = r->headers_out.cache_control.elts;
+    cc = r->headers_out.cache_control;
 
-    if (ccp == NULL) {
-
-        if (ngx_array_init(&r->headers_out.cache_control, r->pool,
-                           1, sizeof(ngx_table_elt_t *))
-            != NGX_OK)
-        {
-            return NGX_ERROR;
-        }
+    if (cc == NULL) {
 
         cc = ngx_list_push(&r->headers_out.headers);
         if (cc == NULL) {
+            e->hash = 0;
             return NGX_ERROR;
         }
+
+        r->headers_out.cache_control = cc;
+        cc->next = NULL;
 
         cc->hash = 1;
         ngx_str_set(&cc->key, "Cache-Control");
 
-        ccp = ngx_array_push(&r->headers_out.cache_control);
-        if (ccp == NULL) {
-            return NGX_ERROR;
-        }
-
-        *ccp = cc;
-
     } else {
-        for (i = 1; i < r->headers_out.cache_control.nelts; i++) {
-            ccp[i]->hash = 0;
+        for (cc = cc->next; cc; cc = cc->next) {
+            cc->hash = 0;
         }
 
-        cc = ccp[0];
+        cc = r->headers_out.cache_control;
+        cc->next = NULL;
     }
 
     if (expires == NGX_HTTP_EXPIRES_EPOCH) {
@@ -420,6 +442,8 @@ ngx_http_set_expires(ngx_http_request_t *r, ngx_http_headers_conf_t *conf)
 
     e->value.data = ngx_pnalloc(r->pool, len);
     if (e->value.data == NULL) {
+        e->hash = 0;
+        cc->hash = 0;
         return NGX_ERROR;
     }
 
@@ -457,6 +481,7 @@ ngx_http_set_expires(ngx_http_request_t *r, ngx_http_headers_conf_t *conf)
     cc->value.data = ngx_pnalloc(r->pool,
                                  sizeof("max-age=") + NGX_TIME_T_LEN + 1);
     if (cc->value.data == NULL) {
+        cc->hash = 0;
         return NGX_ERROR;
     }
 
@@ -564,20 +589,10 @@ static ngx_int_t
 ngx_http_add_multi_header_lines(ngx_http_request_t *r,
     ngx_http_header_val_t *hv, ngx_str_t *value)
 {
-    ngx_array_t      *pa;
     ngx_table_elt_t  *h, **ph;
 
     if (value->len == 0) {
         return NGX_OK;
-    }
-
-    pa = (ngx_array_t *) ((char *) &r->headers_out + hv->offset);
-
-    if (pa->elts == NULL) {
-        if (ngx_array_init(pa, r->pool, 1, sizeof(ngx_table_elt_t *)) != NGX_OK)
-        {
-            return NGX_ERROR;
-        }
     }
 
     h = ngx_list_push(&r->headers_out.headers);
@@ -589,12 +604,12 @@ ngx_http_add_multi_header_lines(ngx_http_request_t *r,
     h->key = hv->key;
     h->value = *value;
 
-    ph = ngx_array_push(pa);
-    if (ph == NULL) {
-        return NGX_ERROR;
-    }
+    ph = (ngx_table_elt_t **) ((char *) &r->headers_out + hv->offset);
+
+    while (*ph) { ph = &(*ph)->next; }
 
     *ph = h;
+    h->next = NULL;
 
     return NGX_OK;
 }
@@ -642,6 +657,7 @@ ngx_http_set_response_header(ngx_http_request_t *r, ngx_http_header_val_t *hv,
         }
 
         *old = h;
+        h->next = NULL;
     }
 
     h->hash = 1;
@@ -672,6 +688,8 @@ ngx_http_headers_create_conf(ngx_conf_t *cf)
      */
 
     conf->expires = NGX_HTTP_EXPIRES_UNSET;
+    conf->headers_inherit = NGX_CONF_UNSET_UINT;
+    conf->trailers_inherit = NGX_CONF_UNSET_UINT;
 
     return conf;
 }
@@ -683,6 +701,8 @@ ngx_http_headers_merge_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_headers_conf_t *prev = parent;
     ngx_http_headers_conf_t *conf = child;
 
+    ngx_http_header_val_t  *hv;
+
     if (conf->expires == NGX_HTTP_EXPIRES_UNSET) {
         conf->expires = prev->expires;
         conf->expires_time = prev->expires_time;
@@ -693,12 +713,43 @@ ngx_http_headers_merge_conf(ngx_conf_t *cf, void *parent, void *child)
         }
     }
 
-    if (conf->headers == NULL) {
-        conf->headers = prev->headers;
+    ngx_conf_merge_uint_value(conf->headers_inherit, prev->headers_inherit,
+                              NGX_HTTP_HEADERS_INHERIT_ON);
+    ngx_conf_merge_uint_value(conf->trailers_inherit, prev->trailers_inherit,
+                              NGX_HTTP_HEADERS_INHERIT_ON);
+
+    if (conf->headers_inherit != NGX_HTTP_HEADERS_INHERIT_OFF
+        && prev->headers)
+    {
+        if (conf->headers == NULL) {
+            conf->headers = prev->headers;
+
+        } else if (conf->headers_inherit == NGX_HTTP_HEADERS_INHERIT_MERGE) {
+            hv = ngx_array_push_n(conf->headers, prev->headers->nelts);
+            if (hv == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            ngx_memcpy(hv, prev->headers->elts,
+                       sizeof(ngx_http_header_val_t) * prev->headers->nelts);
+        }
     }
 
-    if (conf->trailers == NULL) {
-        conf->trailers = prev->trailers;
+    if (conf->trailers_inherit != NGX_HTTP_HEADERS_INHERIT_OFF
+        && prev->trailers)
+    {
+        if (conf->trailers == NULL) {
+            conf->trailers = prev->trailers;
+
+        } else if (conf->trailers_inherit == NGX_HTTP_HEADERS_INHERIT_MERGE) {
+            hv = ngx_array_push_n(conf->trailers, prev->trailers->nelts);
+            if (hv == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            ngx_memcpy(hv, prev->trailers->elts,
+                       sizeof(ngx_http_header_val_t) * prev->trailers->nelts);
+        }
     }
 
     return NGX_CONF_OK;

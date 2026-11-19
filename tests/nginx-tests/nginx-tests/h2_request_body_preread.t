@@ -23,7 +23,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2 proxy limit_req/);
+my $t = Test::Nginx->new()->has(qw/http http_v2 proxy limit_req/)->plan(9);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -37,10 +37,12 @@ events {
 http {
     %%TEST_GLOBALS_HTTP%%
 
-    limit_req_zone   $binary_remote_addr  zone=req:1m rate=30r/m;
+    limit_req_zone   $binary_remote_addr  zone=req:1m rate=20r/m;
+
+    http2 on;
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         listen       127.0.0.1:8081;
         server_name  localhost;
 
@@ -59,7 +61,7 @@ http {
     }
 
     server {
-        listen       127.0.0.1:8082 http2;
+        listen       127.0.0.1:8082;
         server_name  localhost;
 
         http2_body_preread_size 0;
@@ -76,7 +78,7 @@ http {
     }
 
     server {
-        listen       127.0.0.1:8083 http2;
+        listen       127.0.0.1:8083;
         server_name  localhost;
 
         location / {
@@ -89,7 +91,7 @@ http {
 EOF
 
 $t->write_file('t', '');
-$t->run()->plan(8);
+$t->run();
 
 ###############################################################################
 
@@ -128,6 +130,21 @@ $frames = $s->read(all => [{ sid => $sid, fin => 1 }]);
 
 ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 is($frame->{headers}->{'x-body'}, 'TEST', 'within preread limited');
+
+# processing request body without END_STREAM in preread
+
+$sid = $s->new_stream({ path => '/req', body_more => 1, continuation => 1 });
+$s->h2_continue($sid,
+	{ headers => [{ name => 'content-length', value => '8' }]});
+
+$s->h2_body('SEE', { body_more => 1 });
+$s->read(all => [{ type => 'WINDOW_UPDATE' }]);
+
+$s->h2_body('-THIS');
+$frames = $s->read(all => [{ sid => $sid, fin => 1 }]);
+
+($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
+is($frame->{headers}->{'x-body'}, 'SEE-THIS', 'within preread limited - more');
 
 # beyond preread size - limited
 

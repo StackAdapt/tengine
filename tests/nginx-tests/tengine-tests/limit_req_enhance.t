@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 
 # (C) diaoliang
+# Copyright (C) 2012 Alibaba Group Holding Limited
 
 # Tests for nginx limit_req module.
 
@@ -23,10 +24,6 @@ use Test::Nginx;
 
 my $t = Test::Nginx->new()->has(qw/http limit_req/)->plan(27);
 
-$t->set_dso("ngx_http_limit_req_module", "ngx_http_limit_req_module.so");
-$t->set_dso("ngx_http_fastcgi_module", "ngx_http_fastcgi_module.so");
-$t->set_dso("ngx_http_uwsgi_module", "ngx_http_uwsgi_module.so");
-$t->set_dso("ngx_http_scgi_module", "ngx_http_scgi_module.so");
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -35,7 +32,6 @@ $t->write_file_expand('nginx.conf', <<'EOF');
 master_process off;
 daemon         off;
 
-%%TEST_GLOBALS_DSO%%
 
 events {
 }
@@ -140,7 +136,9 @@ like(http_get('/thre.html?a=5'), qr/^HTTP\/1.. 200 /m, 'request accept');
 http_get('/thre.html?a=4');
 like(http_get('/thre.html?a=4'), qr/^HTTP\/1.. 503 /m, 'request rejected');
 http_get('/thre.html');
-like(http_get('/thre.html'), qr/^HTTP\/1.. 200 /m, 'request accpet');
+# Fixme: tengine-2.3.x removed the logic that skip counting
+# with any empty value variable in limit_req_zone.
+like(http_get('/thre.html'), qr/^HTTP\/1.. 503 /m, 'request rejected');
 
 # Second request will be delayed by limit_req, make sure it isn't truncated.
 # The bug only manifests itself if buffer will be filled, so sleep for a while
@@ -185,7 +183,6 @@ $t->write_file_expand('nginx.conf', <<'EOF');
 master_process off;
 daemon         off;
 
-%%TEST_GLOBALS_DSO%%
 
 events {
 }

@@ -37,6 +37,8 @@ static ngx_int_t ngx_http_init_locations(ngx_conf_t *cf,
     ngx_http_core_srv_conf_t *cscf, ngx_http_core_loc_conf_t *pclcf);
 static ngx_int_t ngx_http_init_static_location_trees(ngx_conf_t *cf,
     ngx_http_core_loc_conf_t *pclcf);
+static ngx_int_t ngx_http_escape_location_name(ngx_conf_t *cf,
+    ngx_http_core_loc_conf_t *clcf);
 static ngx_int_t ngx_http_cmp_locations(const ngx_queue_t *one,
     const ngx_queue_t *two);
 static ngx_int_t ngx_http_join_exact_locations(ngx_conf_t *cf,
@@ -75,6 +77,7 @@ ngx_uint_t   ngx_http_max_module;
 
 
 ngx_http_output_header_filter_pt  ngx_http_top_header_filter;
+ngx_http_output_header_filter_pt  ngx_http_top_early_hints_filter;
 ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
 ngx_http_request_body_filter_pt   ngx_http_top_request_body_filter;
 
@@ -684,8 +687,8 @@ static ngx_int_t
 ngx_http_init_locations(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     ngx_http_core_loc_conf_t *pclcf)
 {
-    ngx_uint_t                   n;
-    ngx_queue_t                 *q, *locations, *named, tail;
+    ngx_uint_t                   n, p;
+    ngx_queue_t                 *q, *locations, *named, *predicate, tail;
     ngx_http_core_loc_conf_t    *clcf;
     ngx_http_location_queue_t   *lq;
     ngx_http_core_loc_conf_t   **clcfp;
@@ -708,6 +711,8 @@ ngx_http_init_locations(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     regex = NULL;
     r = 0;
 #endif
+    predicate = NULL;
+    p = 0;
 
     for (q = ngx_queue_head(locations);
          q != ngx_queue_sentinel(locations);
@@ -734,6 +739,16 @@ ngx_http_init_locations(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
         }
 
 #endif
+
+        if (clcf->predicate) {
+            p++;
+
+            if (predicate == NULL) {
+                predicate = q;
+            }
+
+            continue;
+        }
 
         if (clcf->named) {
             n++;
@@ -777,6 +792,29 @@ ngx_http_init_locations(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
         ngx_queue_split(locations, named, &tail);
     }
 
+    if (predicate) {
+        clcfp = ngx_palloc(cf->pool,
+                           (p + 1) * sizeof(ngx_http_core_loc_conf_t *));
+        if (clcfp == NULL) {
+            return NGX_ERROR;
+        }
+
+        pclcf->predicate_locations = clcfp;
+
+        for (q = predicate;
+             q != ngx_queue_sentinel(locations);
+             q = ngx_queue_next(q))
+        {
+            lq = (ngx_http_location_queue_t *) q;
+
+            *(clcfp++) = lq->exact;
+        }
+
+        *clcfp = NULL;
+
+        ngx_queue_split(locations, predicate, &tail);
+    }
+
 #if (NGX_PCRE)
 
     if (regex) {
@@ -814,8 +852,16 @@ ngx_http_init_static_location_trees(ngx_conf_t *cf,
     ngx_http_core_loc_conf_t *pclcf)
 {
     ngx_queue_t                *q, *locations;
-    ngx_http_core_loc_conf_t   *clcf;
+    ngx_http_core_loc_conf_t   *clcf, **clcfp;
     ngx_http_location_queue_t  *lq;
+
+    if (pclcf->predicate_locations) {
+        for (clcfp = pclcf->predicate_locations; *clcfp; clcfp++) {
+            if (ngx_http_init_static_location_trees(cf, *clcfp) != NGX_OK) {
+                return NGX_ERROR;
+            }
+        }
+    }
 
     locations = pclcf->locations;
 
@@ -880,7 +926,7 @@ ngx_http_add_location(ngx_conf_t *cf, ngx_queue_t **locations,
 #if (NGX_PCRE)
         || clcf->regex
 #endif
-        || clcf->named || clcf->noname)
+        || clcf->predicate || clcf->named || clcf->noname)
     {
         lq->exact = clcf;
         lq->inclusive = NULL;
@@ -897,6 +943,41 @@ ngx_http_add_location(ngx_conf_t *cf, ngx_queue_t **locations,
     ngx_queue_init(&lq->list);
 
     ngx_queue_insert_tail(*locations, &lq->queue);
+
+    if (ngx_http_escape_location_name(cf, clcf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_escape_location_name(ngx_conf_t *cf, ngx_http_core_loc_conf_t *clcf)
+{
+    u_char     *p;
+    size_t      len;
+    uintptr_t   escape;
+
+    escape = 2 * ngx_escape_uri(NULL, clcf->name.data, clcf->name.len,
+                                NGX_ESCAPE_URI);
+
+    if (escape) {
+        len = clcf->name.len + escape;
+
+        p = ngx_pnalloc(cf->pool, len);
+        if (p == NULL) {
+            return NGX_ERROR;
+        }
+
+        clcf->escaped_name.len = len;
+        clcf->escaped_name.data = p;
+
+        ngx_escape_uri(p, clcf->name.data, clcf->name.len, NGX_ESCAPE_URI);
+
+    } else {
+        clcf->escaped_name = clcf->name;
+    }
 
     return NGX_OK;
 }
@@ -942,6 +1023,21 @@ ngx_http_cmp_locations(const ngx_queue_t *one, const ngx_queue_t *two)
 
     if (first->named && second->named) {
         return ngx_strcmp(first->name.data, second->name.data);
+    }
+
+    if (first->predicate && !second->predicate) {
+        /* shift predicate locations to the end */
+        return 1;
+    }
+
+    if (!first->predicate && second->predicate) {
+        /* shift predicate locations to the end */
+        return -1;
+    }
+
+    if (first->predicate || second->predicate) {
+        /* do not sort the predicate locations */
+        return 0;
     }
 
 #if (NGX_PCRE)
@@ -1109,7 +1205,7 @@ ngx_http_create_locations_tree(ngx_conf_t *cf, ngx_queue_t *locations,
     node->auto_redirect = (u_char) ((lq->exact && lq->exact->auto_redirect)
                            || (lq->inclusive && lq->inclusive->auto_redirect));
 
-    node->len = (u_char) len;
+    node->len = (u_short) len;
     ngx_memcpy(node->name, &lq->name->data[prefix], len);
 
     ngx_queue_split(locations, q, &tail);
@@ -1162,6 +1258,10 @@ ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     struct sockaddr            *sa;
     ngx_http_conf_port_t       *port;
     ngx_http_core_main_conf_t  *cmcf;
+#if (T_NGX_HAVE_XUDP)
+    ngx_http_conf_addr_t       *addr;
+    ngx_uint_t                  idx;
+#endif
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
@@ -1179,9 +1279,43 @@ ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     port = cmcf->ports->elts;
     for (i = 0; i < cmcf->ports->nelts; i++) {
 
-        if (p != port[i].port || sa->sa_family != port[i].family) {
+        if (p != port[i].port
+            || lsopt->type != port[i].type
+            || sa->sa_family != port[i].family)
+        {
             continue;
         }
+
+
+#if (T_NGX_XQUIC)
+        if ((port[i].udp && !lsopt->xquic) || (!port[i].udp && lsopt->xquic)) {
+            continue;
+        }
+#endif
+#if (T_NGX_HAVE_XUDP)
+        /* if wildcard is xudp, all the address will be xudp */
+        if (lsopt->wildcard && lsopt->xudp) {
+
+            u_char      text[NGX_SOCKADDR_STRLEN];
+            ngx_str_t   addr_str;
+
+            addr_str.data   = text;
+
+            if (!port[i].xudp) {
+                port[i].xudp = 1;
+                ngx_memory_barrier();
+                addr = (ngx_http_conf_addr_t*) port[i].addrs.elts;
+                for(idx = 0; idx < port[i].addrs.nelts; idx++) {
+                    /* force xudp */
+                    addr[idx].opt.xudp = 1;
+                    /* log this  */
+                    addr_str.len  = ngx_sock_ntop(addr[idx].opt.sockaddr, addr[idx].opt.socklen, addr_str.data, NGX_SOCKADDR_STRLEN, 1);
+                    ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                                "xudp wildcard address force all address with same port[%V] xudp on", &addr_str);
+                }
+            }
+        }
+#endif
 
         /* a port is already in the port list */
 
@@ -1196,8 +1330,15 @@ ngx_http_add_listen(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     }
 
     port->family = sa->sa_family;
+    port->type = lsopt->type;
     port->port = p;
     port->addrs.elts = NULL;
+#if (T_NGX_XQUIC)
+    port->udp = lsopt->xquic;
+#endif
+#if (T_NGX_HAVE_XUDP)
+    port->xudp = !!(lsopt->wildcard && lsopt->xudp);
+#endif
 
     return ngx_http_add_address(cf, cscf, port, lsopt);
 }
@@ -1207,13 +1348,23 @@ static ngx_int_t
 ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     ngx_http_conf_port_t *port, ngx_http_listen_opt_t *lsopt)
 {
-    ngx_uint_t             i, default_server, proxy_protocol;
+    ngx_uint_t             i, default_server, proxy_protocol,
+                           protocols, protocols_prev;
     ngx_http_conf_addr_t  *addr;
 #if (NGX_HTTP_SSL)
     ngx_uint_t             ssl;
 #endif
 #if (NGX_HTTP_V2)
     ngx_uint_t             http2;
+#endif
+#if (T_NGX_XQUIC)
+    ngx_uint_t             xquic;
+#endif
+#if (T_NGX_HAVE_XUDP)
+    ngx_uint_t             xudp;
+#endif
+#if (T_NGX_HTTPS_ALLOW_HTTP)
+    ngx_uint_t             https_allow_http;
 #endif
 
     /*
@@ -1243,12 +1394,31 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
         default_server = addr[i].opt.default_server;
 
         proxy_protocol = lsopt->proxy_protocol || addr[i].opt.proxy_protocol;
+        protocols = lsopt->proxy_protocol;
+        protocols_prev = addr[i].opt.proxy_protocol;
 
 #if (NGX_HTTP_SSL)
         ssl = lsopt->ssl || addr[i].opt.ssl;
+        protocols |= lsopt->ssl << 1;
+        protocols_prev |= addr[i].opt.ssl << 1;
 #endif
 #if (NGX_HTTP_V2)
         http2 = lsopt->http2 || addr[i].opt.http2;
+        protocols |= lsopt->http2 << 2;
+        protocols_prev |= addr[i].opt.http2 << 2;
+#endif
+#if (T_NGX_XQUIC)
+        xquic = lsopt->xquic || addr[i].opt.xquic;
+        protocols |= lsopt->xquic << 3;
+        protocols_prev |= addr[i].opt.xquic << 3;
+#endif
+#if (T_NGX_HAVE_XUDP)
+        xudp = lsopt->xudp || addr[i].opt.xudp || port->xudp;
+        protocols |= lsopt->xudp << 4;
+        protocols_prev |= addr[i].opt.xudp << 4;
+#endif
+#if (T_NGX_HTTPS_ALLOW_HTTP)
+        https_allow_http = lsopt->https_allow_http || addr[i].opt.https_allow_http;
 #endif
 
         if (lsopt->set) {
@@ -1278,6 +1448,57 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
             addr[i].default_server = cscf;
         }
 
+        /* check for conflicting protocol options */
+
+        if ((protocols | protocols_prev) != protocols_prev) {
+
+            /* options added */
+
+            if ((addr[i].opt.set && !lsopt->set)
+                || addr[i].protocols_changed
+                || (protocols | protocols_prev) != protocols)
+            {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "protocol options redefined for %V",
+                                   &addr[i].opt.addr_text);
+            }
+
+            addr[i].protocols = protocols_prev;
+            addr[i].protocols_set = 1;
+            addr[i].protocols_changed = 1;
+
+        } else if ((protocols_prev | protocols) != protocols) {
+
+            /* options removed */
+
+            if (lsopt->set
+                || (addr[i].protocols_set && protocols != addr[i].protocols))
+            {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "protocol options redefined for %V",
+                                   &addr[i].opt.addr_text);
+            }
+
+            addr[i].protocols = protocols;
+            addr[i].protocols_set = 1;
+            addr[i].protocols_changed = 1;
+
+        } else {
+
+            /* the same options */
+
+            if ((lsopt->set && addr[i].protocols_changed)
+                || (addr[i].protocols_set && protocols != addr[i].protocols))
+            {
+                ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                                   "protocol options redefined for %V",
+                                   &addr[i].opt.addr_text);
+            }
+
+            addr[i].protocols = protocols;
+            addr[i].protocols_set = 1;
+        }
+
         addr[i].opt.default_server = default_server;
         addr[i].opt.proxy_protocol = proxy_protocol;
 #if (NGX_HTTP_SSL)
@@ -1285,6 +1506,15 @@ ngx_http_add_addresses(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 #endif
 #if (NGX_HTTP_V2)
         addr[i].opt.http2 = http2;
+#endif
+#if (T_NGX_XQUIC)
+        addr[i].opt.xquic = xquic;
+#endif
+#if (T_NGX_HAVE_XUDP)
+        addr[i].opt.xudp = xudp;
+#endif
+#if (T_NGX_HTTPS_ALLOW_HTTP)
+        addr[i].opt.https_allow_http = https_allow_http;
 #endif
 
         return NGX_OK;
@@ -1317,13 +1547,12 @@ ngx_http_add_address(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     }
 
 #if (NGX_HTTP_V2 && NGX_HTTP_SSL                                              \
-     && !defined TLSEXT_TYPE_application_layer_protocol_negotiation           \
-     && !defined TLSEXT_TYPE_next_proto_neg)
+     && !defined TLSEXT_TYPE_application_layer_protocol_negotiation)
 
     if (lsopt->http2 && lsopt->ssl) {
         ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                            "nginx was built with OpenSSL that lacks ALPN "
-                           "and NPN support, HTTP/2 is not enabled for %V",
+                           "support, HTTP/2 is not enabled for %V",
                            &lsopt->addr_text);
     }
 
@@ -1335,6 +1564,9 @@ ngx_http_add_address(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
     }
 
     addr->opt = *lsopt;
+    addr->protocols = 0;
+    addr->protocols_set = 0;
+    addr->protocols_changed = 0;
     addr->hash.buckets = NULL;
     addr->hash.size = 0;
     addr->wc_head = NULL;
@@ -1345,6 +1577,9 @@ ngx_http_add_address(ngx_conf_t *cf, ngx_http_core_srv_conf_t *cscf,
 #endif
     addr->default_server = cscf;
     addr->servers.elts = NULL;
+#if (T_NGX_HAVE_XUDP)
+    addr->opt.xudp = addr->opt.xudp || port->xudp;
+#endif
 
     return ngx_http_add_server(cf, cscf, addr);
 }
@@ -1485,14 +1720,14 @@ ngx_http_server_names(ngx_conf_t *cf, ngx_http_core_main_conf_t *cmcf,
                                   NGX_HASH_WILDCARD_KEY);
 
             if (rc == NGX_ERROR) {
-                return NGX_ERROR;
+                goto failed;
             }
 
             if (rc == NGX_DECLINED) {
                 ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                               "invalid server name or wildcard \"%V\" on %V",
                               &name[n].name, &addr->opt.addr_text);
-                return NGX_ERROR;
+                goto failed;
             }
 
             if (rc == NGX_BUSY) {
@@ -1711,6 +1946,25 @@ ngx_http_init_listening(ngx_conf_t *cf, ngx_http_conf_port_t *port)
     return NGX_OK;
 }
 
+#if (T_NGX_HAVE_XUDP)
+static ngx_int_t
+ngx_inet_addr_is_loopback(struct sockaddr *sa)
+{
+    struct sockaddr_in  *v4;
+    struct sockaddr_in6 *v6;
+
+    switch(sa->sa_family) {
+        case AF_INET:
+            v4 = (struct sockaddr_in*) (sa);
+            return v4->sin_addr.s_addr == htonl(INADDR_LOOPBACK);
+        case AF_INET6:
+            v6 = (struct sockaddr_in6 *) (sa);
+            return IN6_IS_ADDR_LOOPBACK(&v6->sin6_addr);
+        default:
+            return 0;
+    }
+}
+#endif
 
 static ngx_listening_t *
 ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
@@ -1730,7 +1984,6 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
 
     cscf = addr->default_server;
     ls->pool_size = cscf->connection_pool_size;
-    ls->post_accept_timeout = cscf->client_header_timeout;
 
     clcf = cscf->ctx->loc_conf[ngx_http_core_module.ctx_index];
 
@@ -1738,19 +1991,8 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
     ls->log.data = &ls->addr_text;
     ls->log.handler = ngx_accept_log_error;
 
-#if (NGX_WIN32)
-    {
-    ngx_iocp_conf_t  *iocpcf = NULL;
-
-    if (ngx_get_conf(cf->cycle->conf_ctx, ngx_events_module)) {
-        iocpcf = ngx_event_get_conf(cf->cycle->conf_ctx, ngx_iocp_module);
-    }
-    if (iocpcf && iocpcf->acceptex_read) {
-        ls->post_accept_buffer_size = cscf->client_header_buffer_size;
-    }
-    }
-#endif
-
+    ls->type = addr->opt.type;
+    ls->protocol = addr->opt.protocol;
     ls->backlog = addr->opt.backlog;
     ls->rcvbuf = addr->opt.rcvbuf;
     ls->sndbuf = addr->opt.sndbuf;
@@ -1786,6 +2028,30 @@ ngx_http_add_listening(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
     ls->reuseport = addr->opt.reuseport;
 #endif
 
+    ls->wildcard = addr->opt.wildcard;
+
+#if (T_NGX_XQUIC)
+    ls->xquic = addr->opt.xquic;
+    if (ls->xquic) {
+        ls->type = SOCK_DGRAM;
+    }
+#endif
+#if (T_NGX_HAVE_XUDP)
+    if (addr->opt.xudp) {
+        /* udp check */
+        if (ls->type != SOCK_DGRAM) {
+            ngx_log_error(NGX_LOG_ERR, cf->log, 0, "xudp required udp listening");
+            return NULL;
+        }
+        /* loopback address check */
+        if (ngx_inet_addr_is_loopback(addr->opt.sockaddr)) {
+            ngx_log_error(NGX_LOG_ERR, cf->log, 0, "xudp don't support loopback address");
+            return NULL;
+        }
+        ls->xudp = 1;
+    }
+#endif
+
     return ls;
 }
 
@@ -1818,8 +2084,16 @@ ngx_http_add_addrs(ngx_conf_t *cf, ngx_http_port_t *hport,
 #if (NGX_HTTP_V2)
         addrs[i].conf.http2 = addr[i].opt.http2;
 #endif
+#if (T_NGX_HTTPS_ALLOW_HTTP)
+        addrs[i].conf.https_allow_http = addr[i].opt.https_allow_http;
+#endif
         addrs[i].conf.proxy_protocol = addr[i].opt.proxy_protocol;
-
+#if (T_NGX_XQUIC)
+        addrs[i].conf.xquic = addr[i].opt.xquic;
+#endif
+#if (T_NGX_HAVE_XUDP)
+        addrs[i].conf.xudp = addr[i].opt.xudp;
+#endif
         if (addr[i].hash.buckets == NULL
             && (addr[i].wc_head == NULL
                 || addr[i].wc_head->hash.buckets == NULL)
@@ -1883,7 +2157,16 @@ ngx_http_add_addrs6(ngx_conf_t *cf, ngx_http_port_t *hport,
 #if (NGX_HTTP_V2)
         addrs6[i].conf.http2 = addr[i].opt.http2;
 #endif
+#if (T_NGX_HTTPS_ALLOW_HTTP)
+        addrs6[i].conf.https_allow_http = addr[i].opt.https_allow_http;
+#endif
         addrs6[i].conf.proxy_protocol = addr[i].opt.proxy_protocol;
+#if (T_NGX_XQUIC)
+        addrs6[i].conf.xquic = addr[i].opt.xquic;
+#endif
+#if (T_NGX_HAVE_XUDP)
+        addrs6[i].conf.xudp = addr[i].opt.xudp;
+#endif
 
         if (addr[i].hash.buckets == NULL
             && (addr[i].wc_head == NULL

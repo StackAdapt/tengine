@@ -13,6 +13,7 @@ use strict;
 use Test::More;
 
 use IO::Select;
+use Sys::Hostname;
 
 BEGIN { use FindBin; chdir($FindBin::Bin); }
 
@@ -24,6 +25,8 @@ use Test::Nginx::IMAP;
 
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
+
+local $SIG{PIPE} = 'IGNORE';
 
 plan(skip_all => 'win32') if $^O eq 'MSWin32';
 
@@ -43,6 +46,7 @@ events {
 }
 
 mail {
+    proxy_timeout  15s;
     auth_http  http://127.0.0.1:8080/mail/auth;
 
     server {
@@ -140,7 +144,9 @@ sub lines {
 	my ($t, $file, $pattern) = @_;
 
 	if ($file eq 'stderr') {
-		return map { $_ =~ /\Q$pattern\E/ } (<$stderr>);
+		my $value = map { $_ =~ /\Q$pattern\E/ } (<$stderr>);
+		$stderr->clearerr();
+		return $value;
 	}
 
 	my $path = $t->testdir() . '/' . $file;
@@ -233,8 +239,7 @@ SKIP: {
 	ok($sec < 60, "$desc valid seconds");
 
 	ok(defined($host), "$desc has host");
-	chomp(my $hostname = lc `hostname`);
-	is($host , $hostname, "$desc valid host");
+	is($host, lc(hostname()), "$desc valid host");
 
 	ok(defined($tag), "$desc has tag");
 	like($tag, qr'\w+', "$desc valid tag");

@@ -515,7 +515,7 @@ ngx_cidr_match(struct sockaddr *sa, ngx_array_t *cidrs)
 
             p = inaddr6->s6_addr;
 
-            inaddr = p[12] << 24;
+            inaddr = (in_addr_t) p[12] << 24;
             inaddr += p[13] << 16;
             inaddr += p[14] << 8;
             inaddr += p[15];
@@ -647,7 +647,11 @@ ngx_parse_addr_port(ngx_pool_t *pool, ngx_addr_t *addr, u_char *text,
 
         p = ngx_strlchr(text, last, ']');
 
-        if (p == NULL || p == last - 1 || *++p != ':') {
+        if (p == last - 1) {
+            return ngx_parse_addr(pool, addr, text + 1, len - 2);
+        }
+
+        if (p == NULL || *++p != ':') {
             return NGX_DECLINED;
         }
 
@@ -1632,6 +1636,7 @@ ngx_inet_resolve_host(ngx_pool_t *pool, ngx_url_t *u)
 }
 
 #endif /* NGX_HAVE_GETADDRINFO && NGX_HAVE_INET6 */
+
 
 static ngx_int_t
 ngx_inet_add_addr(ngx_pool_t *pool, ngx_url_t *u, struct sockaddr *sockaddr,

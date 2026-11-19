@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 
 # (C) cfsego
+# Copyright (C) 2014 Alibaba Group Holding Limited
 
 # Tests for request statistics features.
 
@@ -30,8 +31,7 @@ my $cf_1 = <<'EOF';
 %%TEST_GLOBALS%%
 
 http {
-
-    root %%TESTDIR%%;
+    %%TEST_GLOBALS_HTTP%%
 
     req_status_zone server "$host,$server_addr:$server_port" 40M;
     req_status_zone test   "$uri"   40M;
@@ -117,8 +117,7 @@ my $cf_2 = <<'EOF';
 %%TEST_GLOBALS%%
 
 http {
-
-    root %%TESTDIR%%;
+    %%TEST_GLOBALS_HTTP%%
 
     req_status_zone server "$host,$server_addr:$server_port error" 40M;
 
@@ -217,11 +216,11 @@ my_http_get('/proxy/B4', 'www.test_app_a.com', 3129);
 
 #5
 $r = my_http_get('/usr', 'www.test_cp.com', 3128);
-like($r, qr/1,400\d,2/, 'upstream');
+like($r, qr/1,40\d\d,2/, 'upstream: check ups_rt ~4s');
 my $r1 = content(my_http_get('/usr1', 'www.test_cp.com', 3128));
 my $r2 = content(my_http_get('/usr2', 'www.test_cp.com', 3128));
 $r = substr($r1, length($r2), length($r1)-length($r2));
-like($r, qr/^,2,200\d$/, 'user defined variable');
+like($r, qr/^,2,20\d\d$/, 'user defined variable: check ups_rt ~2s');
 
 #14
 my_http_get('/B3', 'www.test_app_a.com', 3129);
@@ -281,8 +280,7 @@ my $cf_3 = <<'EOF';
 %%TEST_GLOBALS%%
 
 http {
-
-    root %%TESTDIR%%;
+    %%TEST_GLOBALS_HTTP%%
 
     req_status_zone         test3   "$uri"   1M;
     req_status_zone_recycle test3   1  1;
@@ -346,8 +344,7 @@ my $cf_4 = <<'EOF';
 %%TEST_GLOBALS%%
 
 http {
-
-    root %%TESTDIR%%;
+    %%TEST_GLOBALS_HTTP%%
 
     req_status_zone                    test3   "$uri"   1M;
     req_status_zone_recycle            test3   1  1;
@@ -396,8 +393,7 @@ my $cf_5 = <<'EOF';
 worker_rlimit_core   10000M;
 
 http {
-
-    root %%TESTDIR%%;
+    %%TEST_GLOBALS_HTTP%%
 
     req_status_zone server "$host,$server_addr:$server_port" 40M;
     req_status_zone server1 "$server_port" 10M;

@@ -24,12 +24,13 @@ select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
 my $t = Test::Nginx->new()->has(qw/http rewrite http_v2 grpc/)
-	->has(qw/upstream_keepalive http_ssl/);
+	->has(qw/upstream_keepalive http_ssl/)
+	->has_daemon('openssl');
 
-$t->{_configure_args} =~ /OpenSSL ([\d\.]+)/;
-plan(skip_all => 'OpenSSL too old') unless defined $1 and $1 ge '1.0.2';
+plan(skip_all => 'no ALPN support in OpenSSL')
+	if $t->has_module('OpenSSL') and not $t->has_feature('openssl:1.0.2');
 
-$t->write_file_expand('nginx.conf', <<'EOF');
+$t->write_file_expand('nginx.conf', <<'EOF')->plan(38);
 
 %%TEST_GLOBALS%%
 
@@ -47,18 +48,17 @@ http {
     }
 
     server {
-        listen       127.0.0.1:8081 http2 ssl;
+        listen       127.0.0.1:8081 ssl;
         server_name  localhost;
+
+        http2 on;
+        http2_body_preread_size 128k;
 
         ssl_certificate_key localhost.key;
         ssl_certificate localhost.crt;
 
         ssl_verify_client optional;
         ssl_client_certificate client.crt;
-
-        http2_max_field_size 128k;
-        http2_max_header_size 128k;
-        http2_body_preread_size 128k;
 
         location / {
             grpc_pass 127.0.0.1:8082;
@@ -67,11 +67,10 @@ http {
     }
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         server_name  localhost;
 
-        http2_max_field_size 128k;
-        http2_max_header_size 128k;
+        http2 on;
         http2_body_preread_size 128k;
 
         location / {
@@ -103,7 +102,7 @@ EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]
@@ -121,7 +120,7 @@ foreach my $name ('localhost') {
 
 foreach my $name ('client') {
 	system("openssl genrsa -out $d/$name.key -passout pass:$name "
-		. "-aes128 1024 >>$d/openssl.out 2>&1") == 0
+		. "-aes128 2048 >>$d/openssl.out 2>&1") == 0
 		or die "Can't create private key: $!\n";
 	system('openssl req -x509 -new '
 		. "-config $d/openssl.conf -subj /CN=$name/ "
@@ -134,8 +133,7 @@ foreach my $name ('client') {
 sleep 1 if $^O eq 'MSWin32';
 
 $t->write_file('password', 'client');
-
-$t->try_run('no grpc')->plan(33);
+$t->run();
 
 ###############################################################################
 
@@ -197,6 +195,31 @@ $frames = $f->{http_end}();
 ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 cmp_ok($frame->{headers}{'x-connection'}, '>', $c, 'response 2 - connection');
 
+# flow control
+
+$f->{http_start}('/FlowControl');
+$frames = $f->{data_len}(('Hello' x 13000) . ('x' x 550), 65535);
+my $sum = eval join '+', map { $_->{type} eq "DATA" && $_->{length} } @$frames;
+is($sum, 65535, 'flow control - iws length');
+
+$f->{update}(10);
+$f->{update_sid}(10);
+
+$frames = $f->{data_len}(undef, 10);
+($frame) = grep { $_->{type} eq "DATA" } @$frames;
+is($frame->{length}, 10, 'flow control - update length');
+is($frame->{flags}, 0, 'flow control - update flags');
+
+$f->{update_sid}(10);
+$f->{update}(10);
+
+$frames = $f->{data_len}(undef, 5);
+($frame) = grep { $_->{type} eq "DATA" } @$frames;
+is($frame->{length}, 5, 'flow control - rest length');
+is($frame->{flags}, 1, 'flow control - rest flags');
+
+$f->{http_end}();
+
 # upstream keepalive
 
 $f->{http_start}('/KeepAlive');
@@ -205,16 +228,11 @@ $frames = $f->{http_end}();
 ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 ok($c = $frame->{headers}{'x-connection'}, 'keepalive - connection');
 
-TODO: {
-local $TODO = 'not yet' if $^O eq 'MSWin32';
-
 $f->{http_start}('/KeepAlive');
 $f->{data}('Hello');
 $frames = $f->{http_end}();
 ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 is($frame->{headers}{'x-connection'}, $c, 'keepalive - connection reuse');
-
-}
 
 ###############################################################################
 
@@ -275,6 +293,17 @@ sub grpc {
 		my ($frame) = grep { $_->{type} eq "HEADERS" } @$frames;
 		$sid = $frame->{sid};
 		return $frames;
+	};
+	$f->{data_len} = sub {
+		my ($body, $len) = @_;
+		$s->h2_body($body) if defined $body;
+		return $c->read(all => [{ sid => $sid, length => $len }]);
+	};
+	$f->{update} = sub {
+		$c->h2_window(shift);
+	};
+	$f->{update_sid} = sub {
+		$c->h2_window(shift, $sid);
 	};
 	$f->{data} = sub {
 		my ($body, %extra) = @_;

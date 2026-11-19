@@ -42,6 +42,14 @@ struct ngx_cycle_s {
 
     ngx_log_t                *log;
     ngx_log_t                 new_log;
+#if (T_NGX_XQUIC)
+    ngx_log_t                *x_log;
+    ngx_log_t                 xquic_log;
+#endif
+
+#if (T_NGX_HAVE_XUDP)
+    ngx_xudp_cycle_ctx_t     *xudp_ctx ;
+#endif
 
     ngx_uint_t                log_use_stderr;  /* unsigned  log_use_stderr:1; */
 
@@ -55,6 +63,7 @@ struct ngx_cycle_s {
 
     ngx_queue_t               reusable_connections_queue;
     ngx_uint_t                reusable_connections_n;
+    time_t                    connections_reuse_time;
 
     ngx_array_t               listening;
     ngx_array_t               paths;
@@ -82,6 +91,7 @@ struct ngx_cycle_s {
     ngx_str_t                 conf_param;
     ngx_str_t                 conf_prefix;
     ngx_str_t                 prefix;
+    ngx_str_t                 error_log;
     ngx_str_t                 lock_file;
     ngx_str_t                 hostname;
 #if (NGX_SSL && NGX_SSL_ASYNC)
@@ -123,6 +133,11 @@ typedef struct {
     char                    **environment;
 
     ngx_uint_t                transparent;  /* unsigned  transparent:1; */
+
+#if (T_PIPE_SET_SIZE)
+    size_t pipe_size;
+#endif
+
 } ngx_core_conf_t;
 
 

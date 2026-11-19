@@ -36,6 +36,8 @@ events {
 }
 
 stream {
+    %%TEST_GLOBALS_STREAM%%
+
     log_format  status  $status;
 
     limit_conn_zone  $binary_remote_addr  zone=zone:1m;
@@ -65,6 +67,8 @@ stream {
         listen      127.0.0.1:8084;
         proxy_pass  example.com:$remote_port;
         access_log  %%TESTDIR%%/500.log status;
+
+        proxy_connect_timeout 5;
     }
 
     server {

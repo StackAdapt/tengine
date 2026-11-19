@@ -19,7 +19,7 @@ The force_exit support is not enabled by default. You should compile it explicit
  ./configure --with-force-exit
 ```
 
-Note: Removed force_exit directive after the Tengine-2.3.0 version and use Nginx official `worker_shutdown_timeout` , detailed reference [worker_shutdown_timeout](http://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout)
+Note: Removed force_exit directive after the Tengine-2.3.0 version and use Nginx official `worker_shutdown_timeout` , detailed reference [worker_shutdown_timeout](https://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout)
 
 
 ### worker_processes
@@ -67,33 +67,6 @@ When set to 'auto', Tengine will automatically bind each worker process to a spe
     10000000 01000000 00100000 00010000 00001000 00000100 00000010 00000001 10000000 01000000
 
 When set to 'off', Tengine will disable the CPU affinity.
-
-
-### error_page
-
-Syntax: **error_page** code ... [default] [=[response]]
-
-Default: -
-
-Context: http, server, location, if in location
-
-This directive can specify the page for the specific HTTP response status.
-
-*   Tengine also has a 'default' parameter which can be used to clear the error_page settings in higher level blocks.
-
-For example:
-
-```
-    http {
-        error_page 404 /404.html;
-
-        server {
-            error_page 404 default;
-        }
-    }
-```
-
-In this server block, the 404 error page will be set to Tengine's default 404 page. 
 
 
 ### request_time_cache

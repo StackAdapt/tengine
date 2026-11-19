@@ -45,7 +45,7 @@ static ngx_connection_t  dumb;
 ngx_cycle_t *
 ngx_init_cycle(ngx_cycle_t *old_cycle)
 {
-    void                *rv;
+    void                *rv, *data;
     char               **senv;
     ngx_uint_t           i, n;
     ngx_log_t           *log;
@@ -109,6 +109,15 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         return NULL;
     }
 
+    cycle->error_log.len = old_cycle->error_log.len;
+    cycle->error_log.data = ngx_pnalloc(pool, old_cycle->error_log.len + 1);
+    if (cycle->error_log.data == NULL) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+    ngx_cpystrn(cycle->error_log.data, old_cycle->error_log.data,
+                old_cycle->error_log.len + 1);
+
     cycle->conf_file.len = old_cycle->conf_file.len;
     cycle->conf_file.data = ngx_pnalloc(pool, old_cycle->conf_file.len + 1);
     if (cycle->conf_file.data == NULL) {
@@ -118,11 +127,13 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     ngx_cpystrn(cycle->conf_file.data, old_cycle->conf_file.data,
                 old_cycle->conf_file.len + 1);
 
-    cycle->conf_param.len = old_cycle->conf_param.len;
-    cycle->conf_param.data = ngx_pstrdup(pool, &old_cycle->conf_param);
-    if (cycle->conf_param.data == NULL) {
-        ngx_destroy_pool(pool);
-        return NULL;
+    if (old_cycle->conf_param.len) {
+        cycle->conf_param.len = old_cycle->conf_param.len;
+        cycle->conf_param.data = ngx_pstrdup(pool, &old_cycle->conf_param);
+        if (cycle->conf_param.data == NULL) {
+            ngx_destroy_pool(pool);
+            return NULL;
+        }
     }
 
 
@@ -446,6 +457,9 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 #endif
     }
 
+#if (T_NGX_XQUIC)
+    cycle->x_log = &cycle->xquic_log;
+#endif
     cycle->log = &cycle->new_log;
     pool->log = &cycle->new_log;
 
@@ -478,6 +492,8 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         opart = &old_cycle->shared_memory.part;
         oshm_zone = opart->elts;
 
+        data = NULL;
+
         for (n = 0; /* void */ ; n++) {
 
             if (n >= opart->nelts) {
@@ -501,9 +517,13 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
                 continue;
             }
 
+            if (shm_zone[i].tag == oshm_zone[n].tag && shm_zone[i].noreuse) {
+                data = oshm_zone[n].data;
+                break;
+            }
+
             if (shm_zone[i].tag == oshm_zone[n].tag
-                && shm_zone[i].shm.size == oshm_zone[n].shm.size
-                && !shm_zone[i].noreuse)
+                && shm_zone[i].shm.size == oshm_zone[n].shm.size)
             {
                 shm_zone[i].shm.addr = oshm_zone[n].shm.addr;
 #if (NGX_WIN32)
@@ -530,7 +550,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
             goto failed;
         }
 
-        if (shm_zone[i].init(&shm_zone[i], NULL) != NGX_OK) {
+        if (shm_zone[i].init(&shm_zone[i], data) != NGX_OK) {
             goto failed;
         }
 
@@ -570,7 +590,14 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
                 {
                     nls[n].fd = ls[i].fd;
                     nls[n].previous = &ls[i];
-                    ls[i].remain = 1;
+
+                    if (ls[i].protocol != nls[n].protocol) {
+                        nls[n].change_protocol = 1;
+
+                    } else {
+                        nls[n].inherited = ls[i].inherited;
+                        ls[i].remain = 1;
+                    }
 
                     if (ls[i].backlog != nls[n].backlog) {
                         nls[n].listen = 1;
@@ -623,7 +650,6 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
             }
 
             if (nls[n].fd == (ngx_socket_t) -1) {
-                nls[n].open = 1;
 #if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
                 if (nls[n].accept_filter) {
                     nls[n].add_deferred = 1;
@@ -638,20 +664,21 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         }
 
     } else {
+#if (NGX_HAVE_DEFERRED_ACCEPT)
         ls = cycle->listening.elts;
         for (i = 0; i < cycle->listening.nelts; i++) {
-            ls[i].open = 1;
-#if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
+#ifdef SO_ACCEPTFILTER
             if (ls[i].accept_filter) {
                 ls[i].add_deferred = 1;
             }
 #endif
-#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
+#ifdef TCP_DEFER_ACCEPT
             if (ls[i].deferred_accept) {
                 ls[i].add_deferred = 1;
             }
 #endif
         }
+#endif
     }
 
     if (ngx_open_listening_sockets(cycle) != NGX_OK) {
@@ -1071,6 +1098,7 @@ ngx_int_t
 ngx_create_pidfile(ngx_str_t *name, ngx_log_t *log)
 {
     size_t      len;
+    ngx_int_t   rc;
     ngx_uint_t  create;
     ngx_file_t  file;
     u_char      pid[NGX_INT64_LEN + 2];
@@ -1095,11 +1123,13 @@ ngx_create_pidfile(ngx_str_t *name, ngx_log_t *log)
         return NGX_ERROR;
     }
 
+    rc = NGX_OK;
+
     if (!ngx_test_config) {
         len = ngx_snprintf(pid, NGX_INT64_LEN + 2, "%P%N", ngx_pid) - pid;
 
         if (ngx_write_file(&file, pid, len, 0) == NGX_ERROR) {
-            return NGX_ERROR;
+            rc = NGX_ERROR;
         }
     }
 
@@ -1108,7 +1138,7 @@ ngx_create_pidfile(ngx_str_t *name, ngx_log_t *log)
                       ngx_close_file_n " \"%s\" failed", file.name.data);
     }
 
-    return NGX_OK;
+    return rc;
 }
 
 

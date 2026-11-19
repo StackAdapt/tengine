@@ -15,12 +15,21 @@
 #define NGX_HTTP_USERID_V1    2
 #define NGX_HTTP_USERID_ON    3
 
+#define NGX_HTTP_USERID_COOKIE_OFF              0x0002
+#define NGX_HTTP_USERID_COOKIE_SECURE           0x0004
+#define NGX_HTTP_USERID_COOKIE_HTTPONLY         0x0008
+#define NGX_HTTP_USERID_COOKIE_SAMESITE         0x0010
+#define NGX_HTTP_USERID_COOKIE_SAMESITE_STRICT  0x0020
+#define NGX_HTTP_USERID_COOKIE_SAMESITE_LAX     0x0040
+#define NGX_HTTP_USERID_COOKIE_SAMESITE_NONE    0x0080
+
 /* 31 Dec 2037 23:55:55 GMT */
 #define NGX_HTTP_USERID_MAX_EXPIRES  2145916555
 
 
 typedef struct {
     ngx_uint_t  enable;
+    ngx_uint_t  flags;
 
     ngx_int_t   service;
 
@@ -88,6 +97,20 @@ static ngx_conf_enum_t  ngx_http_userid_state[] = {
 };
 
 
+static ngx_conf_bitmask_t  ngx_http_userid_flags[] = {
+    { ngx_string("off"), NGX_HTTP_USERID_COOKIE_OFF },
+    { ngx_string("secure"), NGX_HTTP_USERID_COOKIE_SECURE },
+    { ngx_string("httponly"), NGX_HTTP_USERID_COOKIE_HTTPONLY },
+    { ngx_string("samesite=strict"),
+      NGX_HTTP_USERID_COOKIE_SAMESITE|NGX_HTTP_USERID_COOKIE_SAMESITE_STRICT },
+    { ngx_string("samesite=lax"),
+      NGX_HTTP_USERID_COOKIE_SAMESITE|NGX_HTTP_USERID_COOKIE_SAMESITE_LAX },
+    { ngx_string("samesite=none"),
+      NGX_HTTP_USERID_COOKIE_SAMESITE|NGX_HTTP_USERID_COOKIE_SAMESITE_NONE },
+    { ngx_null_string, 0 }
+};
+
+
 static ngx_conf_post_handler_pt  ngx_http_userid_domain_p =
     ngx_http_userid_domain;
 static ngx_conf_post_handler_pt  ngx_http_userid_path_p = ngx_http_userid_path;
@@ -137,6 +160,13 @@ static ngx_command_t  ngx_http_userid_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
+
+    { ngx_string("userid_flags"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE123,
+      ngx_conf_set_bitmask_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_userid_conf_t, flags),
+      &ngx_http_userid_flags },
 
     { ngx_string("userid_p3p"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
@@ -289,10 +319,9 @@ ngx_http_userid_set_variable(ngx_http_request_t *r,
 static ngx_http_userid_ctx_t *
 ngx_http_userid_get_uid(ngx_http_request_t *r, ngx_http_userid_conf_t *conf)
 {
-    ngx_int_t                n;
-    ngx_str_t                src, dst;
-    ngx_table_elt_t        **cookies;
-    ngx_http_userid_ctx_t   *ctx;
+    ngx_str_t               src, dst;
+    ngx_table_elt_t        *cookie;
+    ngx_http_userid_ctx_t  *ctx;
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_userid_filter_module);
 
@@ -309,9 +338,9 @@ ngx_http_userid_get_uid(ngx_http_request_t *r, ngx_http_userid_conf_t *conf)
         ngx_http_set_ctx(r, ctx, ngx_http_userid_filter_module);
     }
 
-    n = ngx_http_parse_multi_header_lines(&r->headers_in.cookies, &conf->name,
-                                          &ctx->cookie);
-    if (n == NGX_DECLINED) {
+    cookie = ngx_http_parse_cookie_lines(r, r->headers_in.cookie, &conf->name,
+                                         &ctx->cookie);
+    if (cookie == NULL) {
         return ctx;
     }
 
@@ -319,10 +348,9 @@ ngx_http_userid_get_uid(ngx_http_request_t *r, ngx_http_userid_conf_t *conf)
                    "uid cookie: \"%V\"", &ctx->cookie);
 
     if (ctx->cookie.len < 22) {
-        cookies = r->headers_in.cookies.elts;
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "client sent too short userid cookie \"%V\"",
-                      &cookies[n]->value);
+                      &cookie->value);
         return ctx;
     }
 
@@ -340,10 +368,9 @@ ngx_http_userid_get_uid(ngx_http_request_t *r, ngx_http_userid_conf_t *conf)
     dst.data = (u_char *) ctx->uid_got;
 
     if (ngx_decode_base64(&dst, &src) == NGX_ERROR) {
-        cookies = r->headers_in.cookies.elts;
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "client sent invalid userid cookie \"%V\"",
-                      &cookies[n]->value);
+                      &cookie->value);
         return ctx;
     }
 
@@ -381,6 +408,26 @@ ngx_http_userid_set_uid(ngx_http_request_t *r, ngx_http_userid_ctx_t *ctx,
 
     if (conf->domain.len) {
         len += conf->domain.len;
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SECURE) {
+        len += sizeof("; secure") - 1;
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_HTTPONLY) {
+        len += sizeof("; httponly") - 1;
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_STRICT) {
+        len += sizeof("; samesite=strict") - 1;
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_LAX) {
+        len += sizeof("; samesite=lax") - 1;
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_NONE) {
+        len += sizeof("; samesite=none") - 1;
     }
 
     cookie = ngx_pnalloc(r->pool, len);
@@ -421,6 +468,26 @@ ngx_http_userid_set_uid(ngx_http_request_t *r, ngx_http_userid_ctx_t *ctx,
     p = ngx_copy(p, conf->domain.data, conf->domain.len);
 
     p = ngx_copy(p, conf->path.data, conf->path.len);
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SECURE) {
+        p = ngx_cpymem(p, "; secure", sizeof("; secure") - 1);
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_HTTPONLY) {
+        p = ngx_cpymem(p, "; httponly", sizeof("; httponly") - 1);
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_STRICT) {
+        p = ngx_cpymem(p, "; samesite=strict", sizeof("; samesite=strict") - 1);
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_LAX) {
+        p = ngx_cpymem(p, "; samesite=lax", sizeof("; samesite=lax") - 1);
+    }
+
+    if (conf->flags & NGX_HTTP_USERID_COOKIE_SAMESITE_NONE) {
+        p = ngx_cpymem(p, "; samesite=none", sizeof("; samesite=none") - 1);
+    }
 
     set_cookie = ngx_list_push(&r->headers_out.headers);
     if (set_cookie == NULL) {
@@ -658,6 +725,7 @@ ngx_http_userid_create_conf(ngx_conf_t *cf)
     /*
      * set by ngx_pcalloc():
      *
+     *     conf->flags = 0;
      *     conf->name = { 0, NULL };
      *     conf->domain = { 0, NULL };
      *     conf->path = { 0, NULL };
@@ -681,6 +749,9 @@ ngx_http_userid_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_uint_value(conf->enable, prev->enable,
                               NGX_HTTP_USERID_OFF);
+
+    ngx_conf_merge_bitmask_value(conf->flags, prev->flags,
+                            (NGX_CONF_BITMASK_SET|NGX_HTTP_USERID_COOKIE_OFF));
 
     ngx_conf_merge_str_value(conf->name, prev->name, "uid");
     ngx_conf_merge_str_value(conf->domain, prev->domain, "");

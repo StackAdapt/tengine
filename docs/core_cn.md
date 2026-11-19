@@ -17,7 +17,7 @@ force_exit功能默认没有编译开启。需要编译时开启:
 ```
  ./configure --with-force-exit
 ```
-注意：Tengine-2.3.0 版本后废弃force_exit指令,使用Nginx官方`worker_shutdown_timeout`指令替代，详细[文档](http://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout)
+注意：Tengine-2.3.0 版本后废弃force_exit指令,使用Nginx官方`worker_shutdown_timeout`指令替代，详细[文档](https://nginx.org/en/docs/ngx_core_module.html#worker_shutdown_timeout)
 
 
 ### worker_processes
@@ -62,34 +62,6 @@ Context: core
 当设置成off时，tengine不会进行cpu绑定。
 
 worker_cpu_affinity的error log最多显示64个CPU的绑定情况。
-
-
-### error_page
-
-Syntax: **error_page** code ... [default] [=[response]]
-
-Default: -
-
-Context: http, server, location, if in location
-
-该指令用于设置如果出现指定的HTTP错误状态码，返回给客户端显示的对应uri地址。
-
-*   支持default，可以把上一级设置的error_page重新设定；
-*   修正error_page不能发现重复的code的问题，不能正常继承上一级设置的问题。
-
-举例：
-
-```
-http {
-    error_page 404 /404.html;
-
-    server {
-        error_page 404 default;
-    }
-}
-```
-
-server中的"error_page"指令将404的页面还原成系统默认。
 
 
 ### msie_padding

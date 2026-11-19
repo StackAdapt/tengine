@@ -93,7 +93,7 @@ static ngx_command_t  ngx_http_memcached_commands[] = {
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_memcached_loc_conf_t, upstream.buffer_size),
-      NULL },
+      &ngx_conf_size_nonzero_post },
 
     { ngx_string("memcached_read_timeout"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
@@ -410,6 +410,7 @@ found:
             }
 
             h->hash = 1;
+            h->next = NULL;
             ngx_str_set(&h->key, "Content-Encoding");
             ngx_str_set(&h->value, "gzip");
             r->headers_out.content_encoding = h;
@@ -421,7 +422,11 @@ found:
         p = line.data + line.len;
 
         u->headers_in.content_length_n = ngx_atoof(start, p - start);
-        if (u->headers_in.content_length_n == NGX_ERROR) {
+
+        if (u->headers_in.content_length_n == NGX_ERROR
+            || u->headers_in.content_length_n
+               > NGX_MAX_OFF_T_VALUE - (off_t) NGX_HTTP_MEMCACHED_END)
+        {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                           "memcached sent invalid length in response \"%V\" "
                           "for key \"%V\"",
@@ -494,10 +499,11 @@ ngx_http_memcached_filter(void *data, ssize_t bytes)
 
     if (u->length == (ssize_t) ctx->rest) {
 
-        if (ngx_strncmp(b->last,
+        if (bytes > u->length
+            || ngx_strncmp(b->last,
                    ngx_http_memcached_end + NGX_HTTP_MEMCACHED_END - ctx->rest,
                    bytes)
-            != 0)
+               != 0)
         {
             ngx_log_error(NGX_LOG_ERR, ctx->request->connection->log, 0,
                           "memcached sent invalid trailer");
@@ -549,7 +555,9 @@ ngx_http_memcached_filter(void *data, ssize_t bytes)
 
     last += (size_t) (u->length - NGX_HTTP_MEMCACHED_END);
 
-    if (ngx_strncmp(last, ngx_http_memcached_end, b->last - last) != 0) {
+    if (bytes > u->length
+        || ngx_strncmp(last, ngx_http_memcached_end, b->last - last) != 0)
+    {
         ngx_log_error(NGX_LOG_ERR, ctx->request->connection->log, 0,
                       "memcached sent invalid trailer");
 
@@ -613,14 +621,12 @@ ngx_http_memcached_create_loc_conf(ngx_conf_t *cf)
     conf->upstream.local = NGX_CONF_UNSET_PTR;
     conf->upstream.socket_keepalive = NGX_CONF_UNSET;
     conf->upstream.next_upstream_tries = NGX_CONF_UNSET_UINT;
-
     conf->upstream.connect_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.send_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.read_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.next_upstream_timeout = NGX_CONF_UNSET_MSEC;
 
     conf->upstream.buffer_size = NGX_CONF_UNSET_SIZE;
-
 
     /* the hardcoded values */
     conf->upstream.cyclic_temp_file = 0;
@@ -685,7 +691,6 @@ ngx_http_memcached_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->upstream.next_upstream = NGX_CONF_BITMASK_SET
                                        |NGX_HTTP_UPSTREAM_FT_OFF;
     }
-
 
     if (conf->upstream.upstream == NULL) {
         conf->upstream.upstream = prev->upstream.upstream;

@@ -135,6 +135,24 @@ ngx_http_upstream_init_dynamic(ngx_conf_t *cf,
     dcf = ngx_http_conf_upstream_srv_conf(us,
                                           ngx_http_upstream_dynamic_module);
 
+    /*
+     * Keep one static address for each server to resolve name only one
+     * time. And server[].addrs should not be used in this case.
+     */
+
+    if (us->servers) {
+        server = us->servers->elts;
+
+        for (i = 0; i < us->servers->nelts; i++) {
+            host = server[i].host;
+            if (ngx_inet_addr(host.data, host.len) == INADDR_NONE) {
+                if (server[i].naddrs > 1) {
+                    server[i].naddrs = 1;
+                }
+            }
+        }
+    }
+
     if (dcf->original_init_upstream(cf, us) != NGX_OK) {
         return NGX_ERROR;
     }
@@ -473,13 +491,13 @@ ngx_http_upstream_get_dynamic_peer(ngx_peer_connection_t *pc, void *data)
 
     /* resolve name */
 
-    if (pc->host == NULL) {
+    if (pc->dyn_resolve_host == NULL) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
                        "load balancer doesn't support dyn resolve!");
         return NGX_OK;
     }
 
-    if (ngx_inet_addr(pc->host->data, pc->host->len) != INADDR_NONE) {
+    if (ngx_inet_addr(pc->dyn_resolve_host->data, pc->dyn_resolve_host->len) != INADDR_NONE) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
                        "host is an IP address, connect directly!");
         return NGX_OK;
@@ -492,7 +510,7 @@ ngx_http_upstream_get_dynamic_peer(ngx_peer_connection_t *pc, void *data)
         return NGX_OK;
     }
 
-    temp.name = *pc->host;
+    temp.name = *pc->dyn_resolve_host;
 
     ctx = ngx_resolve_start(clcf->resolver, &temp);
     if (ctx == NULL) {
@@ -507,7 +525,7 @@ ngx_http_upstream_get_dynamic_peer(ngx_peer_connection_t *pc, void *data)
         return NGX_OK;
     }
 
-    ctx->name = *pc->host;
+    ctx->name = *pc->dyn_resolve_host;
     /* TODO remove */
     // ctx->type = NGX_RESOLVE_A;
     /* END */

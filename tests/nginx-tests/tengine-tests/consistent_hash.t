@@ -1,5 +1,7 @@
 #!/usr/bin/perl
 
+# Copyright (C) 2013 Alibaba Group Holding Limited
+
 use warnings;
 use strict;
 
@@ -30,8 +32,6 @@ worker_processes  1;
 events {
 }
 
-%%TEST_GLOBALS_DSO%%
-
 http {
     %%TEST_GLOBALS_HTTP%%
     upstream consistent_hash {
@@ -43,35 +43,35 @@ http {
     }
 
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location / {
             proxy_pass http://consistent_hash/;
         }
     }
 
     server {
-        listen 9000;
+        listen 127.0.0.1:9000;
         location / {
             index 9000;
         }
     }
 
     server {
-        listen 9001;
+        listen 127.0.0.1:9001;
         location / {
             index 9001;
         }
     }
 
     server {
-        listen 9002;
+        listen 127.0.0.1:9002;
         location / {
             index 9002;
         }
     }
 
     server {
-        listen 9003;
+        listen 127.0.0.1:9003;
         location / {
             index 9003;
         }
@@ -99,8 +99,6 @@ worker_processes  1;
 events {
 }
 
-%%TEST_GLOBALS_DSO%%
-
 http {
     %%TEST_GLOBALS_HTTP%%
     upstream consistent_hash {
@@ -113,14 +111,14 @@ http {
     }
 
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location / {
             proxy_pass http://consistent_hash/;
         }
     }
 
     server {
-        listen 9004;
+        listen 127.0.0.1:9004;
         location / {
             index 9004;
         }
@@ -147,7 +145,6 @@ worker_processes  1;
 events {
 }
 
-%%TEST_GLOBALS_DSO%%
 http {
     %%TEST_GLOBALS_HTTP%%
     upstream consistent_hash {
@@ -159,35 +156,35 @@ http {
     }
 
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location / {
             proxy_pass http://consistent_hash/;
         }
     }
 
     server {
-        listen 9000;
+        listen 127.0.0.1:9000;
         location / {
             index 9000;
         }
     }
 
     server {
-        listen 9001;
+        listen 127.0.0.1:9001;
         location / {
             index 9001;
         }
     }
 
     server {
-        listen 9002;
+        listen 127.0.0.1:9002;
         location / {
             index 9002;
         }
     }
 
     server {
-        listen 9003;
+        listen 127.0.0.1:9003;
         location / {
             index 9003;
         }
@@ -204,7 +201,7 @@ for (my $count = 1; $count <= 10000; $count++) {
     $arg = join '', map { $cset[int rand @cset] } 0..1000;
     $r = http_get("/?$arg");
     $res = getres($r);
-    $result{$res} += 1;
+    $result{$res} += 1 if defined($res);
 }
 print "9000 weight=1  9001 weight=1  9002 weight=1  9003 weight=1\n";
 foreach $res (keys(%result)) {
@@ -220,7 +217,6 @@ worker_processes  1;
 events {
 }
 
-%%TEST_GLOBALS_DSO%%
 http {
     %%TEST_GLOBALS_HTTP%%
     upstream consistent_hash {
@@ -231,35 +227,35 @@ http {
     }
 
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location / {
             proxy_pass http://consistent_hash/;
         }
     }
 
     server {
-        listen 9000;
+        listen 127.0.0.1:9000;
         location / {
             index 9000;
         }
     }
 
     server {
-        listen 9001;
+        listen 127.0.0.1:9001;
         location / {
             index 9001;
         }
     }
 
     server {
-        listen 9002;
+        listen 127.0.0.1:9002;
         location / {
             index 9002;
         }
     }
 
     server {
-        listen 9003;
+        listen 127.0.0.1:9003;
         location / {
             index 9003;
         }
@@ -276,7 +272,7 @@ for (my $count = 1; $count <= 10000; $count++) {
     $arg = join '', map { $cset[int rand @cset] } 0..1000;
     $r = http_get("/?$arg");
     $res = getres($r);
-    $result{$res} += 1;
+    $result{$res} += 1 if defined($res);
 }
 
 print "9000 weight=1  9001 weight=10  9002 weight=100\n";
@@ -289,6 +285,7 @@ $t->stop();
 sub getres
 {
     my ($c) = @_;
+    return undef unless defined($c);
     $c =~ m/\r\n\r\n(\d*)/;
     return $1;
 }

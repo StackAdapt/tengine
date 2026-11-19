@@ -70,6 +70,7 @@ static void ngx_mail_auth_sleep_handler(ngx_event_t *rev);
 static ngx_int_t ngx_mail_auth_http_parse_header_line(ngx_mail_session_t *s,
     ngx_mail_auth_http_ctx_t *ctx);
 static void ngx_mail_auth_http_block_read(ngx_event_t *rev);
+static void ngx_mail_auth_http_block_write(ngx_event_t *wev);
 static void ngx_mail_auth_http_dummy_handler(ngx_event_t *ev);
 static ngx_buf_t *ngx_mail_auth_http_create_request(ngx_mail_session_t *s,
     ngx_pool_t *pool, ngx_mail_auth_http_conf_t *ahcf);
@@ -216,7 +217,10 @@ ngx_mail_auth_http_init(ngx_mail_session_t *s)
     ctx->peer.connection->data = s;
     ctx->peer.connection->pool = s->connection->pool;
 
+    s->out.len = 0;
+
     s->connection->read->handler = ngx_mail_auth_http_block_read;
+    s->connection->write->handler = ngx_mail_auth_http_block_write;
     ctx->peer.connection->read->handler = ngx_mail_auth_http_read_handler;
     ctx->peer.connection->write->handler = ngx_mail_auth_http_write_handler;
 
@@ -688,6 +692,8 @@ ngx_mail_auth_http_process_headers(ngx_mail_session_t *s,
 
             ngx_close_connection(ctx->peer.connection);
 
+            s->connection->write->handler = ngx_mail_send;
+
             if (ctx->err.len) {
 
                 ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
@@ -985,21 +991,6 @@ ngx_mail_auth_http_parse_header_line(ngx_mail_session_t *s,
                 break;
             }
 
-            if (ch == CR) {
-                ctx->header_name_end = p;
-                ctx->header_start = p;
-                ctx->header_end = p;
-                state = sw_almost_done;
-                break;
-            }
-
-            if (ch == LF) {
-                ctx->header_name_end = p;
-                ctx->header_start = p;
-                ctx->header_end = p;
-                goto done;
-            }
-
             return NGX_ERROR;
 
         /* space* before header value */
@@ -1121,6 +1112,29 @@ ngx_mail_auth_http_block_read(ngx_event_t *rev)
 
 
 static void
+ngx_mail_auth_http_block_write(ngx_event_t *wev)
+{
+    ngx_connection_t          *c;
+    ngx_mail_session_t        *s;
+    ngx_mail_auth_http_ctx_t  *ctx;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_MAIL, wev->log, 0,
+                   "mail auth http block write");
+
+    if (ngx_handle_write_event(wev, 0) != NGX_OK) {
+        c = wev->data;
+        s = c->data;
+
+        ctx = ngx_mail_get_module_ctx(s, ngx_mail_auth_http_module);
+
+        ngx_close_connection(ctx->peer.connection);
+        ngx_destroy_pool(ctx->pool);
+        ngx_mail_session_internal_server_error(s);
+    }
+}
+
+
+static void
 ngx_mail_auth_http_dummy_handler(ngx_event_t *ev)
 {
     ngx_log_debug0(NGX_LOG_DEBUG_MAIL, ev->log, 0,
@@ -1135,10 +1149,10 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
     size_t                     len;
     ngx_buf_t                 *b;
     ngx_str_t                  login, passwd;
-#if (NGX_MAIL_SSL)
-    ngx_str_t                  verify, subject, issuer, serial, fingerprint,
-                               raw_cert, cert;
     ngx_connection_t          *c;
+#if (NGX_MAIL_SSL)
+    ngx_str_t                  protocol, cipher, verify, subject, issuer,
+                               serial, fingerprint, raw_cert, cert;
     ngx_mail_ssl_conf_t       *sslcf;
 #endif
     ngx_mail_core_srv_conf_t  *cscf;
@@ -1151,9 +1165,29 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
         return NULL;
     }
 
+    c = s->connection;
+
 #if (NGX_MAIL_SSL)
 
-    c = s->connection;
+    if (c->ssl) {
+
+        if (ngx_ssl_get_protocol(c, pool, &protocol) != NGX_OK) {
+            return NULL;
+        }
+
+        protocol.len = ngx_strlen(protocol.data);
+
+        if (ngx_ssl_get_cipher_name(c, pool, &cipher) != NGX_OK) {
+            return NULL;
+        }
+
+        cipher.len = ngx_strlen(cipher.data);
+
+    } else {
+        ngx_str_null(&protocol);
+        ngx_str_null(&cipher);
+    }
+
     sslcf = ngx_mail_get_module_srv_conf(s, ngx_mail_ssl_module);
 
     if (c->ssl && sslcf->verify) {
@@ -1224,21 +1258,52 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
           + sizeof("Client-IP: ") - 1 + s->connection->addr_text.len
                 + sizeof(CRLF) - 1
           + sizeof("Client-Host: ") - 1 + s->host.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SMTP-Helo: ") - 1 + s->smtp_helo.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SMTP-From: ") - 1 + s->smtp_from.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SMTP-To: ") - 1 + s->smtp_to.len + sizeof(CRLF) - 1
-#if (NGX_MAIL_SSL)
-          + sizeof("Auth-SSL: on" CRLF) - 1
-          + sizeof("Auth-SSL-Verify: ") - 1 + verify.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SSL-Subject: ") - 1 + subject.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SSL-Issuer: ") - 1 + issuer.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SSL-Serial: ") - 1 + serial.len + sizeof(CRLF) - 1
-          + sizeof("Auth-SSL-Fingerprint: ") - 1 + fingerprint.len
-              + sizeof(CRLF) - 1
-          + sizeof("Auth-SSL-Cert: ") - 1 + cert.len + sizeof(CRLF) - 1
-#endif
           + ahcf->header.len
           + sizeof(CRLF) - 1;
+
+    if (c->proxy_protocol) {
+        len += sizeof("Proxy-Protocol-Addr: ") - 1
+                     + c->proxy_protocol->src_addr.len + sizeof(CRLF) - 1
+               + sizeof("Proxy-Protocol-Port: ") - 1
+                     + sizeof("65535") - 1 + sizeof(CRLF) - 1
+               + sizeof("Proxy-Protocol-Server-Addr: ") - 1
+                     + c->proxy_protocol->dst_addr.len + sizeof(CRLF) - 1
+               + sizeof("Proxy-Protocol-Server-Port: ") - 1
+                     + sizeof("65535") - 1 + sizeof(CRLF) - 1;
+    }
+
+    if (s->auth_method == NGX_MAIL_AUTH_NONE) {
+        len += sizeof("Auth-SMTP-Helo: ") - 1 + s->smtp_helo.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SMTP-From: ") - 1 + s->smtp_from.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SMTP-To: ") - 1 + s->smtp_to.len
+                     + sizeof(CRLF) - 1;
+    }
+
+#if (NGX_MAIL_SSL)
+
+    if (c->ssl) {
+        len += sizeof("Auth-SSL: on" CRLF) - 1
+               + sizeof("Auth-SSL-Protocol: ") - 1 + protocol.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Cipher: ") - 1 + cipher.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Verify: ") - 1 + verify.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Subject: ") - 1 + subject.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Issuer: ") - 1 + issuer.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Serial: ") - 1 + serial.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Fingerprint: ") - 1 + fingerprint.len
+                     + sizeof(CRLF) - 1
+               + sizeof("Auth-SSL-Cert: ") - 1 + cert.len
+                     + sizeof(CRLF) - 1;
+    }
+
+#endif
 
     b = ngx_create_temp_buf(pool, len);
     if (b == NULL) {
@@ -1270,11 +1335,14 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
     b->last = ngx_copy(b->last, passwd.data, passwd.len);
     *b->last++ = CR; *b->last++ = LF;
 
-    if (s->auth_method != NGX_MAIL_AUTH_PLAIN && s->salt.len) {
+    if ((s->auth_method == NGX_MAIL_AUTH_APOP
+         || s->auth_method == NGX_MAIL_AUTH_CRAM_MD5)
+        && s->salt.len)
+    {
         b->last = ngx_cpymem(b->last, "Auth-Salt: ", sizeof("Auth-Salt: ") - 1);
         b->last = ngx_copy(b->last, s->salt.data, s->salt.len);
 
-        s->passwd.data = NULL;
+        ngx_str_null(&s->passwd);
     }
 
     b->last = ngx_cpymem(b->last, "Auth-Protocol: ",
@@ -1296,6 +1364,26 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
                              sizeof("Client-Host: ") - 1);
         b->last = ngx_copy(b->last, s->host.data, s->host.len);
         *b->last++ = CR; *b->last++ = LF;
+    }
+
+    if (c->proxy_protocol) {
+        b->last = ngx_cpymem(b->last, "Proxy-Protocol-Addr: ",
+                             sizeof("Proxy-Protocol-Addr: ") - 1);
+        b->last = ngx_copy(b->last, c->proxy_protocol->src_addr.data,
+                           c->proxy_protocol->src_addr.len);
+        *b->last++ = CR; *b->last++ = LF;
+
+        b->last = ngx_sprintf(b->last, "Proxy-Protocol-Port: %d" CRLF,
+                              c->proxy_protocol->src_port);
+
+        b->last = ngx_cpymem(b->last, "Proxy-Protocol-Server-Addr: ",
+                             sizeof("Proxy-Protocol-Server-Addr: ") - 1);
+        b->last = ngx_copy(b->last, c->proxy_protocol->dst_addr.data,
+                           c->proxy_protocol->dst_addr.len);
+        *b->last++ = CR; *b->last++ = LF;
+
+        b->last = ngx_sprintf(b->last, "Proxy-Protocol-Server-Port: %d" CRLF,
+                              c->proxy_protocol->dst_port);
     }
 
     if (s->auth_method == NGX_MAIL_AUTH_NONE) {
@@ -1324,6 +1412,20 @@ ngx_mail_auth_http_create_request(ngx_mail_session_t *s, ngx_pool_t *pool,
     if (c->ssl) {
         b->last = ngx_cpymem(b->last, "Auth-SSL: on" CRLF,
                              sizeof("Auth-SSL: on" CRLF) - 1);
+
+        if (protocol.len) {
+            b->last = ngx_cpymem(b->last, "Auth-SSL-Protocol: ",
+                                 sizeof("Auth-SSL-Protocol: ") - 1);
+            b->last = ngx_copy(b->last, protocol.data, protocol.len);
+            *b->last++ = CR; *b->last++ = LF;
+        }
+
+        if (cipher.len) {
+            b->last = ngx_cpymem(b->last, "Auth-SSL-Cipher: ",
+                                 sizeof("Auth-SSL-Cipher: ") - 1);
+            b->last = ngx_copy(b->last, cipher.data, cipher.len);
+            *b->last++ = CR; *b->last++ = LF;
+        }
 
         if (verify.len) {
             b->last = ngx_cpymem(b->last, "Auth-SSL-Verify: ",

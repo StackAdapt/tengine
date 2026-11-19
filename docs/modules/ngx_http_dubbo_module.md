@@ -2,7 +2,7 @@ ngx_http_dubbo_module
 ====
 
 This module provides support for the backend Dubbo support after Tengine version 2.3.2.
-[Apache Dubbo™](http://dubbo.apache.org)  is a high-performance, java based open source RPC framework.It is open source by Alibaba, in years of development, it is one of the most popular microservice framework.
+[Apache Dubbo™](https://dubbo.apache.org)  is a high-performance, java based open source RPC framework.It is open source by Alibaba, in years of development, it is one of the most popular microservice framework.
 
 There are two roles Consumer(client) and Provider(Server) in Dubbo. This module is used to make Tengine as a proxy gateway which receives HTTP/HTTPS/HTTP2 requests at the front then as a Dubbo Consumer passes the requests to backend Dubbo Provider service.
 
@@ -104,10 +104,12 @@ Context: `location, if in location`
 
 configure use Dubbo protocol proxy to upstream
 
-*service_name*: Dubbo provider service name
-*service_version*: Dubbo provider service version
-*method*: Dubbo provider service method
-*upstream_name*: backend upstream name
+* *service_name*: Dubbo provider service name
+* *service_version*: Dubbo provider service version
+* *method*: Dubbo provider service method
+* *upstream_name*: backend upstream name
+
+Nginx variables can be used as `service_name`, `service_version` and `method`.
 
 ```
 # proxy to upstream dubbo_backend
@@ -115,7 +117,12 @@ upstream dubbo_backend {
     multi 1;
     server 127.0.0.1:20880;
 }
-dubbo_pass org.apache.dubbo.demo.DemoService 0.0.0 http_dubbo_nginx dubbo_backend;
+
+set $dubbo_service_name "org.apache.dubbo.demo.DemoService";
+set $dubbo_service_name "0.0.0";
+set $dubbo_service_name "http_dubbo_nginx";
+
+dubbo_pass $dubbo_service_name $dubbo_service_version $dubbo_method dubbo_backend;
 ```
 
 Notice:

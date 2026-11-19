@@ -17,6 +17,7 @@
 typedef struct {
     u_char                       *ip;
     u_char                       *pos;
+    u_char                       *end;
     ngx_stream_variable_value_t  *sp;
 
     ngx_str_t                     buf;
@@ -25,6 +26,7 @@ typedef struct {
     unsigned                      flushed:1;
     unsigned                      skip:1;
 
+    ngx_int_t                     status;
     ngx_stream_session_t         *session;
 } ngx_stream_script_engine_t;
 
@@ -112,6 +114,8 @@ ngx_int_t ngx_stream_compile_complex_value(
     ngx_stream_compile_complex_value_t *ccv);
 char *ngx_stream_set_complex_value_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+char *ngx_stream_set_complex_value_zero_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 char *ngx_stream_set_complex_value_size_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
@@ -124,6 +128,9 @@ void ngx_stream_script_flush_no_cacheable_variables(ngx_stream_session_t *s,
     ngx_array_t *indices);
 
 void *ngx_stream_script_add_code(ngx_array_t *codes, size_t size, void *code);
+
+ngx_int_t ngx_stream_script_check_length(ngx_stream_script_engine_t *e,
+    size_t len);
 
 size_t ngx_stream_script_copy_len_code(ngx_stream_script_engine_t *e);
 void ngx_stream_script_copy_code(ngx_stream_script_engine_t *e);

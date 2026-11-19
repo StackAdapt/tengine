@@ -13,8 +13,7 @@
 #include <ngx_http.h>
 
 
-#define NGX_HTTP_V2_ALPN_ADVERTISE       "\x02h2"
-#define NGX_HTTP_V2_NPN_ADVERTISE        NGX_HTTP_V2_ALPN_ADVERTISE
+#define NGX_HTTP_V2_ALPN_PROTO           "\x02h2"
 
 #define NGX_HTTP_V2_STATE_BUFFER_SIZE    16
 
@@ -25,21 +24,20 @@
 #define NGX_HTTP_V2_MAX_FIELD                                                 \
     (127 + (1 << (NGX_HTTP_V2_INT_OCTETS - 1) * 7) - 1)
 
-#define NGX_HTTP_V2_STREAM_ID_SIZE       4
-
 #define NGX_HTTP_V2_FRAME_HEADER_SIZE    9
 
 /* frame types */
-#define NGX_HTTP_V2_DATA_FRAME           0x0
-#define NGX_HTTP_V2_HEADERS_FRAME        0x1
-#define NGX_HTTP_V2_PRIORITY_FRAME       0x2
-#define NGX_HTTP_V2_RST_STREAM_FRAME     0x3
-#define NGX_HTTP_V2_SETTINGS_FRAME       0x4
-#define NGX_HTTP_V2_PUSH_PROMISE_FRAME   0x5
-#define NGX_HTTP_V2_PING_FRAME           0x6
-#define NGX_HTTP_V2_GOAWAY_FRAME         0x7
-#define NGX_HTTP_V2_WINDOW_UPDATE_FRAME  0x8
-#define NGX_HTTP_V2_CONTINUATION_FRAME   0x9
+#define NGX_HTTP_V2_DATA_FRAME             0x00
+#define NGX_HTTP_V2_HEADERS_FRAME          0x01
+#define NGX_HTTP_V2_PRIORITY_FRAME         0x02
+#define NGX_HTTP_V2_RST_STREAM_FRAME       0x03
+#define NGX_HTTP_V2_SETTINGS_FRAME         0x04
+#define NGX_HTTP_V2_PUSH_PROMISE_FRAME     0x05
+#define NGX_HTTP_V2_PING_FRAME             0x06
+#define NGX_HTTP_V2_GOAWAY_FRAME           0x07
+#define NGX_HTTP_V2_WINDOW_UPDATE_FRAME    0x08
+#define NGX_HTTP_V2_CONTINUATION_FRAME     0x09
+#define NGX_HTTP_V2_PRIORITY_UPDATE_FRAME  0x10
 
 /* frame flags */
 #define NGX_HTTP_V2_NO_FLAG              0x00
@@ -52,8 +50,6 @@
 #define NGX_HTTP_V2_MAX_WINDOW           ((1U << 31) - 1)
 #define NGX_HTTP_V2_DEFAULT_WINDOW       65535
 
-#define NGX_HTTP_V2_DEFAULT_WEIGHT       16
-
 
 typedef struct ngx_http_v2_connection_s   ngx_http_v2_connection_t;
 typedef struct ngx_http_v2_node_s         ngx_http_v2_node_t;
@@ -62,6 +58,15 @@ typedef struct ngx_http_v2_out_frame_s    ngx_http_v2_out_frame_t;
 
 typedef u_char *(*ngx_http_v2_handler_pt) (ngx_http_v2_connection_t *h2c,
     u_char *pos, u_char *end);
+
+
+typedef struct {
+    ngx_flag_t                       enable;
+    size_t                           pool_size;
+    ngx_uint_t                       concurrent_streams;
+    size_t                           preread_size;
+    ngx_uint_t                       streams_index_mask;
+} ngx_http_v2_srv_conf_t;
 
 
 typedef struct {
@@ -74,6 +79,7 @@ typedef struct {
     ngx_uint_t                       sid;
     size_t                           length;
     size_t                           padding;
+    ssize_t                          window_delta;
     unsigned                         flags:8;
 
     unsigned                         incomplete:1;
@@ -119,15 +125,17 @@ struct ngx_http_v2_connection_s {
     ngx_connection_t                *connection;
     ngx_http_connection_t           *http_connection;
 
+    off_t                            total_bytes;
+    off_t                            payload_bytes;
+
     ngx_uint_t                       processing;
     ngx_uint_t                       frames;
     ngx_uint_t                       idle;
-    ngx_uint_t                       priority_limit;
-
-    ngx_uint_t                       pushing;
-    ngx_uint_t                       concurrent_pushes;
+    ngx_uint_t                       new_streams;
+    ngx_uint_t                       refused_streams;
 
     size_t                           send_window;
+    size_t                           send_queued;
     size_t                           recv_window;
     size_t                           init_window;
 
@@ -148,32 +156,27 @@ struct ngx_http_v2_connection_s {
 
     ngx_http_v2_out_frame_t         *last_out;
 
-    ngx_queue_t                      dependencies;
     ngx_queue_t                      closed;
 
+    ngx_uint_t                       closed_nodes;
     ngx_uint_t                       last_sid;
-    ngx_uint_t                       last_push;
 
-    unsigned                         closed_nodes:8;
+    time_t                           lingering_time;
+
     unsigned                         settings_ack:1;
     unsigned                         table_update:1;
     unsigned                         blocked:1;
     unsigned                         goaway:1;
-    unsigned                         push_disabled:1;
 };
 
 
 struct ngx_http_v2_node_s {
     ngx_uint_t                       id;
     ngx_http_v2_node_t              *index;
-    ngx_http_v2_node_t              *parent;
-    ngx_queue_t                      queue;
-    ngx_queue_t                      children;
     ngx_queue_t                      reuse;
-    ngx_uint_t                       rank;
-    ngx_uint_t                       weight;
-    double                           rel_weight;
     ngx_http_v2_stream_t            *stream;
+    ngx_http_priority_t              priority;
+    ngx_uint_t                       priority_set; /* unsigned priority_set:1 */
 };
 
 
@@ -202,9 +205,13 @@ struct ngx_http_v2_stream_s {
     ngx_queue_t                      queue;
 
     ngx_array_t                     *cookies;
+    ngx_array_t                     *priorities;
+
+    ngx_http_priority_state_t        priority;
 
     ngx_pool_t                      *pool;
 
+    unsigned                         initialized:1;
     unsigned                         waiting:1;
     unsigned                         blocked:1;
     unsigned                         exhausted:1;
@@ -213,6 +220,7 @@ struct ngx_http_v2_stream_s {
     unsigned                         rst_sent:1;
     unsigned                         no_flow_control:1;
     unsigned                         skip_data:1;
+    unsigned                         priority_update:1;
 };
 
 
@@ -231,9 +239,34 @@ struct ngx_http_v2_out_frame_s {
 };
 
 
-static ngx_inline void
-ngx_http_v2_queue_frame(ngx_http_v2_connection_t *h2c,
-    ngx_http_v2_out_frame_t *frame)
+/* a non-incremental response completes sooner, equal priority is FIFO */
+
+static ngx_inline ngx_uint_t
+ngx_http_v2_stream_precedes(ngx_http_v2_stream_t *s,
+    ngx_http_v2_stream_t *stream)
+{
+    ngx_http_priority_t  *a, *b;
+
+    a = &s->priority.effective;
+    b = &stream->priority.effective;
+
+    if (a->urgency != b->urgency) {
+        return a->urgency < b->urgency;
+    }
+
+    if (a->incremental != b->incremental) {
+        return !a->incremental;
+    }
+
+    return s->node->id <= stream->node->id;
+}
+
+
+/* all frames of a stream are queued at the same position */
+
+static ngx_inline ngx_http_v2_out_frame_t **
+ngx_http_v2_queue_position(ngx_http_v2_connection_t *h2c,
+    ngx_http_v2_stream_t *stream)
 {
     ngx_http_v2_out_frame_t  **out;
 
@@ -243,15 +276,19 @@ ngx_http_v2_queue_frame(ngx_http_v2_connection_t *h2c,
             break;
         }
 
-        if ((*out)->stream->node->rank < frame->stream->node->rank
-            || ((*out)->stream->node->rank == frame->stream->node->rank
-                && (*out)->stream->node->rel_weight
-                   >= frame->stream->node->rel_weight))
-        {
+        if (ngx_http_v2_stream_precedes((*out)->stream, stream)) {
             break;
         }
     }
 
+    return out;
+}
+
+
+static ngx_inline void
+ngx_http_v2_queue_frame(ngx_http_v2_out_frame_t **out,
+    ngx_http_v2_out_frame_t *frame)
+{
     frame->next = *out;
     *out = frame;
 }
@@ -289,9 +326,6 @@ void ngx_http_v2_init(ngx_event_t *rev);
 ngx_int_t ngx_http_v2_read_request_body(ngx_http_request_t *r);
 ngx_int_t ngx_http_v2_read_unbuffered_request_body(ngx_http_request_t *r);
 
-ngx_http_v2_stream_t *ngx_http_v2_push_stream(ngx_http_v2_stream_t *parent,
-    ngx_str_t *path);
-
 void ngx_http_v2_close_stream(ngx_http_v2_stream_t *stream, ngx_int_t rc);
 
 ngx_int_t ngx_http_v2_send_output_queue(ngx_http_v2_connection_t *h2c);
@@ -305,12 +339,6 @@ ngx_int_t ngx_http_v2_get_indexed_header(ngx_http_v2_connection_t *h2c,
 ngx_int_t ngx_http_v2_add_header(ngx_http_v2_connection_t *h2c,
     ngx_http_v2_header_t *header);
 ngx_int_t ngx_http_v2_table_size(ngx_http_v2_connection_t *h2c, size_t size);
-
-
-ngx_int_t ngx_http_v2_huff_decode(u_char *state, u_char *src, size_t len,
-    u_char **dst, ngx_uint_t last, ngx_log_t *log);
-size_t ngx_http_v2_huff_encode(u_char *src, size_t len, u_char *dst,
-    ngx_uint_t lower);
 
 
 #define ngx_http_v2_prefix(bits)  ((1 << (bits)) - 1)
@@ -399,20 +427,25 @@ size_t ngx_http_v2_huff_encode(u_char *src, size_t len, u_char *dst,
 #define NGX_HTTP_V2_STATUS_404_INDEX      13
 #define NGX_HTTP_V2_STATUS_500_INDEX      14
 
-#define NGX_HTTP_V2_ACCEPT_ENCODING_INDEX 16
-#define NGX_HTTP_V2_ACCEPT_LANGUAGE_INDEX 17
 #define NGX_HTTP_V2_CONTENT_LENGTH_INDEX  28
 #define NGX_HTTP_V2_CONTENT_TYPE_INDEX    31
 #define NGX_HTTP_V2_DATE_INDEX            33
 #define NGX_HTTP_V2_LAST_MODIFIED_INDEX   44
 #define NGX_HTTP_V2_LOCATION_INDEX        46
 #define NGX_HTTP_V2_SERVER_INDEX          54
-#define NGX_HTTP_V2_USER_AGENT_INDEX      58
 #define NGX_HTTP_V2_VARY_INDEX            59
+
+#define NGX_HTTP_V2_PREFACE_START         "PRI * HTTP/2.0\r\n"
+#define NGX_HTTP_V2_PREFACE_END           "\r\nSM\r\n\r\n"
+#define NGX_HTTP_V2_PREFACE               NGX_HTTP_V2_PREFACE_START           \
+                                          NGX_HTTP_V2_PREFACE_END
 
 
 u_char *ngx_http_v2_string_encode(u_char *dst, u_char *src, size_t len,
     u_char *tmp, ngx_uint_t lower);
+
+
+extern ngx_module_t  ngx_http_v2_module;
 
 
 #endif /* _NGX_HTTP_V2_H_INCLUDED_ */

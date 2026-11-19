@@ -8,10 +8,39 @@
 #include <ngx_http.h>
 #include <ngx_config.h>
 
+#include "ngx_upstream_check_module.h"
+#include "ngx_http_upstream_check_http_parse.h"
+#include "ngx_upstream_check_send_parse.h"
 
-typedef struct ngx_http_upstream_check_peer_s ngx_http_upstream_check_peer_t;
-typedef struct ngx_http_upstream_check_srv_conf_s
-    ngx_http_upstream_check_srv_conf_t;
+
+/*
+ * Phase of the HTTP health-check response parser. The health verdict is
+ * reached as soon as the status line (and, for keepalive, the headers) is
+ * parsed -- it never waits for the body. Draining the body afterwards is the
+ * job of the discard handler, so there is no BODY phase here.
+ */
+enum {
+    NGX_CHECK_PARSE_STATUS_LINE = 0,
+    NGX_CHECK_PARSE_HEADERS,
+    NGX_CHECK_PARSE_DONE
+};
+
+
+/*
+ * The peer, the check configuration and the packet callbacks now live in
+ * ngx_upstream_check_module.h under protocol-agnostic names, because the
+ * stream side shares them. These aliases keep the ngx_http_* spelling used
+ * throughout this file.
+ */
+typedef ngx_upstream_check_peer_t          ngx_http_upstream_check_peer_t;
+typedef ngx_upstream_check_srv_conf_t      ngx_http_upstream_check_srv_conf_t;
+
+#define ngx_http_upstream_check_packet_init_pt                               \
+    ngx_upstream_check_packet_init_pt
+#define ngx_http_upstream_check_packet_parse_pt                              \
+    ngx_upstream_check_packet_parse_pt
+#define ngx_http_upstream_check_packet_clean_pt                              \
+    ngx_upstream_check_packet_clean_pt
 
 
 #if (NGX_HAVE_PACK_PRAGMA)
@@ -78,6 +107,11 @@ typedef struct {
 
     size_t                                   padding;
     size_t                                   length;
+
+    /* HTTP response parse state (reset by reinit before every check) */
+    ngx_uint_t                               parse_phase;    /* NGX_CHECK_PARSE_* */
+    ngx_uint_t                               code_n;         /* remembered status class */
+    ngx_http_check_headers_ctx_t             http_headers;   /* header parse state */
 } ngx_http_upstream_check_ctx_t;
 
 
@@ -96,6 +130,17 @@ typedef struct {
     ngx_uint_t                               access_count;
 
     ngx_uint_t                               checksum;
+
+    /*
+     * Which upstream on which protocol side this record belongs to. The address
+     * alone does not identify a peer: the same server may appear in several
+     * upstreams, and the HTTP and the stream side share one shared memory zone,
+     * so an address occurs once per upstream that lists it. Inheriting state
+     * across a reload matches on this as well, otherwise every peer with that
+     * address would take over the state of whichever one came first.
+     */
+    ngx_uint_t                               upstream_hash;
+    ngx_uint_t                               protocol;
 
     struct sockaddr                         *sockaddr;
     socklen_t                                socklen;
@@ -126,14 +171,7 @@ typedef struct {
 #define NGX_HTTP_CHECK_ALL_DONE              0x0008
 
 
-typedef ngx_int_t (*ngx_http_upstream_check_packet_init_pt)
-    (ngx_http_upstream_check_peer_t *peer);
-typedef ngx_int_t (*ngx_http_upstream_check_packet_parse_pt)
-    (ngx_http_upstream_check_peer_t *peer);
-typedef void (*ngx_http_upstream_check_packet_clean_pt)
-    (ngx_http_upstream_check_peer_t *peer);
-
-struct ngx_http_upstream_check_peer_s {
+struct ngx_upstream_check_peer_s {
     ngx_flag_t                               state;
     ngx_pool_t                              *pool;
     ngx_uint_t                               index;
@@ -144,6 +182,9 @@ struct ngx_http_upstream_check_peer_s {
     ngx_event_t                              check_ev;
     ngx_event_t                              check_timeout_ev;
     ngx_peer_connection_t                    pc;
+
+    /* side that registered this peer, NGX_UPSTREAM_CHECK_* */
+    ngx_uint_t                               protocol;
 
     void                                    *check_data;
     ngx_event_handler_pt                     send_handler;
@@ -156,6 +197,19 @@ struct ngx_http_upstream_check_peer_s {
     ngx_http_upstream_check_peer_shm_t      *shm;
     ngx_http_upstream_check_srv_conf_t      *conf;
 
+    /*
+     * HTTP response body drain state, kept across the check cycle (reinit does
+     * not touch it; the parser sets it afresh on every verdict). After the
+     * health verdict the discard handler drains the remaining body here, and
+     * connect_handler refuses to reuse a connection whose body is not yet
+     * fully drained (recv_body_pending), which is what makes keepalive reuse
+     * safe against response-body pollution.
+     */
+    off_t                                    recv_body_remaining;
+    ngx_uint_t                               recv_chunk_state;
+    unsigned                                 recv_body_chunked:1;
+    unsigned                                 recv_body_pending:1;
+
     unsigned                                 delete;
 };
 
@@ -166,6 +220,15 @@ typedef struct {
     ngx_array_t                              peers;
     ngx_slab_pool_t                         *shpool;
 
+    /*
+     * The zone this container was registered with, and the largest
+     * "check_shm_size" seen so far from any protocol side. Both belong to the
+     * container rather than to a static, so that they are scoped to the
+     * configuration that owns it.
+     */
+    ngx_shm_zone_t                          *shm_zone;
+    ngx_uint_t                               shm_size_hint;
+
     ngx_http_upstream_check_peers_shm_t     *peers_shm;
 } ngx_http_upstream_check_peers_t;
 
@@ -175,6 +238,7 @@ typedef struct {
 #define NGX_HTTP_CHECK_SSL_HELLO             0x0004
 #define NGX_HTTP_CHECK_MYSQL                 0x0008
 #define NGX_HTTP_CHECK_AJP                   0x0010
+#define NGX_HTTP_CHECK_SEND                  0x0020
 
 #define NGX_CHECK_HTTP_1XX                   0x0002
 #define NGX_CHECK_HTTP_2XX                   0x0004
@@ -184,27 +248,7 @@ typedef struct {
 
 #define NGX_CHECK_HTTP_ERR                   0x8000
 
-typedef struct {
-    ngx_uint_t                               type;
-
-    ngx_str_t                                name;
-
-    ngx_str_t                                default_send;
-
-    /* HTTP */
-    ngx_uint_t                               default_status_alive;
-
-    ngx_event_handler_pt                     send_handler;
-    ngx_event_handler_pt                     recv_handler;
-
-    ngx_http_upstream_check_packet_init_pt   init;
-    ngx_http_upstream_check_packet_parse_pt  parse;
-    ngx_http_upstream_check_packet_clean_pt  reinit;
-
-    unsigned need_pool;
-    unsigned need_keepalive;
-} ngx_check_conf_t;
-
+/* ngx_check_conf_t now lives in ngx_upstream_check_module.h */
 
 typedef void (*ngx_http_upstream_check_status_format_pt) (ngx_buf_t *b,
     ngx_http_upstream_check_peers_t *peers, ngx_uint_t flag);
@@ -241,27 +285,7 @@ typedef struct {
 } ngx_http_upstream_check_main_conf_t;
 
 
-struct ngx_http_upstream_check_srv_conf_s {
-    ngx_uint_t                               port;
-    ngx_uint_t                               fall_count;
-    ngx_uint_t                               rise_count;
-    ngx_msec_t                               check_interval;
-    ngx_msec_t                               check_timeout;
-    ngx_uint_t                               check_keepalive_requests;
-
-    ngx_check_conf_t                        *check_type_conf;
-    ngx_str_t                                send;
-
-    union {
-        ngx_uint_t                           return_code;
-        ngx_uint_t                           status_alive;
-    } code;
-
-    ngx_array_t                             *fastcgi_params;
-
-    ngx_uint_t                               default_down;
-    ngx_uint_t                               unique;
-};
+/* ngx_upstream_check_srv_conf_t now lives in ngx_upstream_check_module.h */
 
 
 typedef struct {
@@ -368,7 +392,7 @@ static ngx_http_fastcgi_request_start_t  ngx_http_fastcgi_request_start = {
 
 static ngx_uint_t ngx_http_upstream_check_add_dynamic_peer_shm(
     ngx_pool_t *pool, ngx_http_upstream_check_srv_conf_t *ucscf,
-    ngx_addr_t *peer_addr);
+    ngx_str_t *upstream_name, ngx_addr_t *peer_addr, ngx_uint_t protocol);
 static void ngx_http_upstream_check_clear_dynamic_peer_shm(
     ngx_http_upstream_check_peer_shm_t *peer_shm);
 
@@ -426,6 +450,13 @@ static ngx_int_t ngx_http_upstream_check_mysql_parse(
 static void ngx_http_upstream_check_mysql_reinit(
     ngx_http_upstream_check_peer_t *peer);
 
+static ngx_int_t ngx_http_upstream_check_send_init(
+    ngx_http_upstream_check_peer_t *peer);
+static ngx_int_t ngx_http_upstream_check_send_parse(
+    ngx_http_upstream_check_peer_t *peer);
+static void ngx_http_upstream_check_send_reinit(
+    ngx_http_upstream_check_peer_t *peer);
+
 static ngx_int_t ngx_http_upstream_check_ajp_init(
     ngx_http_upstream_check_peer_t *peer);
 static ngx_int_t ngx_http_upstream_check_ajp_parse(
@@ -470,6 +501,7 @@ static void ngx_http_upstream_check_status_prometheus_format(ngx_buf_t *b,
 
 static ngx_int_t ngx_http_upstream_check_addr_change_port(ngx_pool_t *pool,
     ngx_addr_t *dst, ngx_addr_t *src, ngx_uint_t port);
+static ngx_flag_t ngx_http_upstream_check_addr_has_port(ngx_addr_t *addr);
 
 static ngx_check_conf_t *ngx_http_get_check_type_conf(ngx_str_t *str);
 
@@ -478,6 +510,10 @@ static char *ngx_http_upstream_check(ngx_conf_t *cf,
 static char *ngx_http_upstream_check_keepalive_requests(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_upstream_check_http_send(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_http_upstream_check_send(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_http_upstream_check_expect_response(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static char *ngx_http_upstream_check_http_expect_alive(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
@@ -511,15 +547,17 @@ static char * ngx_http_upstream_check_merge_loc_conf(ngx_conf_t *cf,
 #define MAX_DYNAMIC_PEER 4096
 #define SHM_NAME_LEN     256
 
-static char *ngx_http_upstream_check_init_shm(ngx_conf_t *cf, void *conf);
-
 static ngx_int_t ngx_http_upstream_check_get_shm_name(ngx_str_t *shm_name,
     ngx_pool_t *pool, ngx_uint_t generation);
+static ngx_uint_t ngx_upstream_check_shm_min_size(ngx_uint_t number);
 static ngx_shm_zone_t *ngx_shared_memory_find(ngx_cycle_t *cycle,
     ngx_str_t *name, void *tag);
+static ngx_uint_t ngx_http_upstream_check_upstream_hash(
+    ngx_str_t *upstream_name);
 static ngx_http_upstream_check_peer_shm_t *
 ngx_http_upstream_check_find_shm_peer(
-    ngx_http_upstream_check_peers_shm_t *peers_shm, ngx_addr_t *addr);
+    ngx_http_upstream_check_peers_shm_t *peers_shm, ngx_addr_t *addr,
+    ngx_uint_t upstream_hash, ngx_uint_t protocol);
 
 static ngx_int_t ngx_http_upstream_check_init_shm_peer(
     ngx_http_upstream_check_peer_shm_t *peer_shm,
@@ -562,6 +600,20 @@ static ngx_command_t  ngx_http_upstream_check_commands[] = {
     { ngx_string("check_http_send"),
       NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1,
       ngx_http_upstream_check_http_send,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("check_send"),
+      NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1,
+      ngx_http_upstream_check_send,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("check_expect_response"),
+      NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1,
+      ngx_http_upstream_check_expect_response,
       0,
       0,
       NULL },
@@ -700,6 +752,8 @@ static ngx_check_conf_t  ngx_check_types[] = {
       NULL,
       NULL,
       0,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP|NGX_UPSTREAM_CHECK_STREAM,
       0 },
 
     { NGX_HTTP_CHECK_HTTP,
@@ -712,7 +766,9 @@ static ngx_check_conf_t  ngx_check_types[] = {
       ngx_http_upstream_check_http_parse,
       ngx_http_upstream_check_http_reinit,
       1,
-      1 },
+      1,
+      NGX_UPSTREAM_CHECK_HTTP,
+      0 },
 
     { NGX_HTTP_CHECK_HTTP,
       ngx_string("fastcgi"),
@@ -724,6 +780,8 @@ static ngx_check_conf_t  ngx_check_types[] = {
       ngx_http_upstream_check_fastcgi_parse,
       ngx_http_upstream_check_http_reinit,
       1,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP,
       0 },
 
     { NGX_HTTP_CHECK_SSL_HELLO,
@@ -736,6 +794,8 @@ static ngx_check_conf_t  ngx_check_types[] = {
       ngx_http_upstream_check_ssl_hello_parse,
       ngx_http_upstream_check_ssl_hello_reinit,
       1,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP|NGX_UPSTREAM_CHECK_STREAM,
       0 },
 
     { NGX_HTTP_CHECK_MYSQL,
@@ -748,7 +808,52 @@ static ngx_check_conf_t  ngx_check_types[] = {
       ngx_http_upstream_check_mysql_parse,
       ngx_http_upstream_check_mysql_reinit,
       1,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP|NGX_UPSTREAM_CHECK_STREAM,
       0 },
+
+    /*
+     * A protocol-independent probe: send a fixed byte string, then look for
+     * "check_expect_response" in whatever comes back (any byte will do when no
+     * expectation is configured). Enough to health-check a proprietary
+     * protocol without teaching this module about it.
+     */
+    { NGX_HTTP_CHECK_SEND,
+      ngx_string("send"),
+      ngx_null_string,
+      0,
+      ngx_http_upstream_check_send_handler,
+      ngx_http_upstream_check_recv_handler,
+      ngx_http_upstream_check_send_init,
+      ngx_http_upstream_check_send_parse,
+      ngx_http_upstream_check_send_reinit,
+      1,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP|NGX_UPSTREAM_CHECK_STREAM,
+      0 },
+
+    /*
+     * The datagram variant of "send". UDP has no handshake, so probing the
+     * port alone proves nothing: the peer is judged purely by whether a reply
+     * comes back (and matches "check_expect_response" when one is set) before
+     * the check times out. Give it a more generous "timeout" than a TCP check
+     * for that reason. A connected UDP socket also surfaces ICMP port
+     * unreachable as an error on the next read, which fails the check right
+     * away instead of waiting for the timeout.
+     */
+    { NGX_HTTP_CHECK_SEND,
+      ngx_string("udp"),
+      ngx_null_string,
+      0,
+      ngx_http_upstream_check_send_handler,
+      ngx_http_upstream_check_recv_handler,
+      ngx_http_upstream_check_send_init,
+      ngx_http_upstream_check_send_parse,
+      ngx_http_upstream_check_send_reinit,
+      1,
+      0,
+      NGX_UPSTREAM_CHECK_STREAM,
+      SOCK_DGRAM },
 
     { NGX_HTTP_CHECK_AJP,
       ngx_string("ajp"),
@@ -760,6 +865,8 @@ static ngx_check_conf_t  ngx_check_types[] = {
       ngx_http_upstream_check_ajp_parse,
       ngx_http_upstream_check_ajp_reinit,
       1,
+      0,
+      NGX_UPSTREAM_CHECK_HTTP,
       0 },
 
     { 0,
@@ -771,6 +878,8 @@ static ngx_check_conf_t  ngx_check_types[] = {
       NULL,
       NULL,
       NULL,
+      0,
+      0,
       0,
       0 }
 };
@@ -813,32 +922,45 @@ static ngx_check_status_command_t ngx_check_status_commands[] =  {
 static ngx_uint_t ngx_http_upstream_check_shm_generation = 0;
 static ngx_http_upstream_check_peers_t *check_peers_ctx = NULL;
 
+/*
+ * The container of checked peers is shared by every protocol side, so that
+ * one shared memory zone, one index space and one set of timers cover both
+ * HTTP and stream upstreams. It is rebuilt once per cycle: whichever side
+ * calls ngx_upstream_check_get_peers() first for a cycle creates it.
+ *
+ * check_peers_cycle only tells the current configuration apart from the
+ * previous one, it is not an identity: a cycle discarded by a failed reload is
+ * regularly reallocated at the same address by the next one. What keeps the
+ * two apart is the cleanup handler below, which drops these pointers as soon
+ * as the pool holding the container goes away.
+ */
+static ngx_http_upstream_check_peers_t *check_peers_cur = NULL;
+static ngx_cycle_t                     *check_peers_cycle = NULL;
+
 
 ngx_uint_t
-ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
-    ngx_http_upstream_srv_conf_t *us, ngx_addr_t *peer_addr)
+ngx_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
+    ngx_upstream_check_srv_conf_t *ucscf, ngx_str_t *upstream_name,
+    ngx_addr_t *peer_addr, ngx_uint_t protocol)
 {
     void                                 *elts;
     ngx_uint_t                            i, index;
     ngx_http_upstream_check_peer_t       *peer, *p, *np;
     ngx_http_upstream_check_peers_t      *peers;
-    ngx_http_upstream_check_srv_conf_t   *ucscf;
-    ngx_http_upstream_check_main_conf_t  *ucmcf;
     ngx_http_upstream_check_peer_shm_t   *peer_shm;
     ngx_http_upstream_check_peers_shm_t  *peers_shm;
 
-    if (check_peers_ctx == NULL || us->srv_conf == NULL) {
+    if (check_peers_ctx == NULL || ucscf == NULL) {
         return NGX_ERROR;
     }
-
-    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
 
     if(ucscf->check_interval == 0) {
         return NGX_ERROR;
     }
 
-    index = ngx_http_upstream_check_add_dynamic_peer_shm(pool,
-                                                         ucscf, peer_addr);
+    index = ngx_http_upstream_check_add_dynamic_peer_shm(pool, ucscf,
+                                                         upstream_name,
+                                                         peer_addr, protocol);
     if (index == (ngx_uint_t) NGX_ERROR) {
         return index;
     }
@@ -846,9 +968,7 @@ ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
     peers_shm = check_peers_ctx->peers_shm;
     peer_shm = peers_shm->peers;
 
-    ucmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle,
-                                               ngx_http_upstream_check_module);
-    peers = ucmcf->peers;
+    peers = check_peers_ctx;
     peer = NULL;
 
     p = peers->peers.elts;
@@ -917,15 +1037,16 @@ ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
 
     peer->conf = ucscf;
     peer->index = index;
-    peer->upstream_name = &us->host;
+    peer->upstream_name = upstream_name;
     peer->peer_addr = peer_addr;
+    peer->protocol = protocol;
 
     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, pool->log, 0,
-                   "http upstream check add dynamic upstream: %V, "
+                   "upstream check add dynamic upstream: %V, "
                    "peer: %V, index: %ui",
-                   &us->host, &peer_addr->name, index);
+                   upstream_name, &peer_addr->name, index);
 
-    if (ucscf->port) {
+    if (ucscf->port && ngx_http_upstream_check_addr_has_port(peer_addr)) {
         peer->check_peer_addr = ngx_pcalloc(pool, sizeof(ngx_addr_t));
         if (peer->check_peer_addr == NULL) {
             return NGX_ERROR;
@@ -935,10 +1056,30 @@ ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
                 peer->check_peer_addr, peer_addr, ucscf->port)
             != NGX_OK) {
 
+            ngx_log_error(NGX_LOG_ERR, pool->log, 0,
+                          "upstream check cannot apply \"port=%ui\" to "
+                          "peer \"%V\" in upstream \"%V\", it is excluded "
+                          "from health checking",
+                          ucscf->port, &peer_addr->name, upstream_name);
+
             return NGX_ERROR;
         }
 
     } else {
+        /*
+         * An address without the notion of a port, such as a unix domain
+         * socket, cannot be checked on a different port: ignore "port=" and
+         * check the peer on its own address instead of silently dropping it
+         * out of health checking.
+         */
+        if (ucscf->port) {
+            ngx_log_error(NGX_LOG_WARN, pool->log, 0,
+                          "upstream check ignores \"port=%ui\" for peer "
+                          "\"%V\" in upstream \"%V\", the peer has no port "
+                          "and is checked on its own address",
+                          ucscf->port, &peer_addr->name, upstream_name);
+        }
+
         peer->check_peer_addr = peer->peer_addr;
     }
 
@@ -959,36 +1100,36 @@ ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
 
 
 ngx_uint_t
-ngx_http_upstream_check_add_peer(ngx_conf_t *cf,
-    ngx_http_upstream_srv_conf_t *us, ngx_addr_t *peer_addr)
+ngx_upstream_check_add_peer(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf, ngx_str_t *upstream_name,
+    ngx_addr_t *peer_addr, ngx_uint_t protocol)
 {
     ngx_uint_t                            index;
     ngx_http_upstream_check_peer_t       *peer;
     ngx_http_upstream_check_peers_t      *peers;
-    ngx_http_upstream_check_srv_conf_t   *ucscf;
-    ngx_http_upstream_check_main_conf_t  *ucmcf;
 
-    if (us->srv_conf == NULL) {
+    if (ucscf == NULL) {
         return NGX_ERROR;
     }
-
-    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
 
     if(ucscf->check_interval == 0) {
         return NGX_ERROR;
     }
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                   "http upstream check add upstream process: %ui",
+                   "upstream check add upstream process: %ui",
                    ngx_process);
 
     if (ngx_process == NGX_PROCESS_WORKER) {
-        return ngx_http_upstream_check_add_dynamic_peer(cf->pool, us, peer_addr);
+        return ngx_upstream_check_add_dynamic_peer(cf->pool, ucscf,
+                                                   upstream_name, peer_addr,
+                                                   protocol);
     }
 
-    ucmcf = ngx_http_conf_get_module_main_conf(cf,
-                                               ngx_http_upstream_check_module);
-    peers = ucmcf->peers;
+    peers = ngx_upstream_check_get_peers(cf);
+    if (peers == NULL) {
+        return NGX_ERROR;
+    }
 
     if (ucscf->unique) {
         index = ngx_http_upstream_check_unique_peer(peers, peer_addr, ucscf);
@@ -1006,10 +1147,11 @@ ngx_http_upstream_check_add_peer(ngx_conf_t *cf,
 
     peer->index = peers->peers.nelts - 1;
     peer->conf = ucscf;
-    peer->upstream_name = &us->host;
+    peer->upstream_name = upstream_name;
     peer->peer_addr = peer_addr;
+    peer->protocol = protocol;
 
-    if (ucscf->port) {
+    if (ucscf->port && ngx_http_upstream_check_addr_has_port(peer_addr)) {
         peer->check_peer_addr = ngx_pcalloc(cf->pool, sizeof(ngx_addr_t));
         if (peer->check_peer_addr == NULL) {
             return NGX_ERROR;
@@ -1019,10 +1161,30 @@ ngx_http_upstream_check_add_peer(ngx_conf_t *cf,
                 peer->check_peer_addr, peer_addr, ucscf->port)
             != NGX_OK) {
 
+            ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
+                               "\"check\" cannot apply \"port=%ui\" to peer "
+                               "\"%V\" in upstream \"%V\", it is excluded "
+                               "from health checking",
+                               ucscf->port, &peer_addr->name, upstream_name);
+
             return NGX_ERROR;
         }
 
     } else {
+        /*
+         * An address without the notion of a port, such as a unix domain
+         * socket, cannot be checked on a different port: ignore "port=" and
+         * check the peer on its own address instead of silently dropping it
+         * out of health checking.
+         */
+        if (ucscf->port) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "\"check\" ignores \"port=%ui\" for peer "
+                               "\"%V\" in upstream \"%V\", the peer has no "
+                               "port and is checked on its own address",
+                               ucscf->port, &peer_addr->name, upstream_name);
+        }
+
         peer->check_peer_addr = peer->peer_addr;
     }
 
@@ -1030,6 +1192,69 @@ ngx_http_upstream_check_add_peer(ngx_conf_t *cf,
         ngx_murmur_hash2(peer_addr->name.data, peer_addr->name.len);
 
     return peer->index;
+}
+
+
+/*
+ * The HTTP entry points: resolve the check configuration and the upstream
+ * name out of the HTTP upstream, then hand over to the protocol-agnostic
+ * core above.
+ */
+
+ngx_uint_t
+ngx_http_upstream_check_add_peer(ngx_conf_t *cf,
+    ngx_http_upstream_srv_conf_t *us, ngx_addr_t *peer_addr)
+{
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    if (us->srv_conf == NULL) {
+        return NGX_ERROR;
+    }
+
+    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_add_peer(cf, ucscf, &us->host, peer_addr,
+                                       NGX_UPSTREAM_CHECK_HTTP);
+}
+
+
+ngx_uint_t
+ngx_http_upstream_check_add_dynamic_peer(ngx_pool_t *pool,
+    ngx_http_upstream_srv_conf_t *us, ngx_addr_t *peer_addr)
+{
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    if (us->srv_conf == NULL) {
+        return NGX_ERROR;
+    }
+
+    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_add_dynamic_peer(pool, ucscf, &us->host,
+                                               peer_addr,
+                                               NGX_UPSTREAM_CHECK_HTTP);
+}
+
+
+/*
+ * Whether the address family carries a port that a health check can be
+ * redirected to. Keep the families in sync with the switch in
+ * ngx_http_upstream_check_addr_change_port() below.
+ */
+static ngx_flag_t
+ngx_http_upstream_check_addr_has_port(ngx_addr_t *addr)
+{
+    switch (addr->sockaddr->sa_family) {
+
+    case AF_INET:
+#if (NGX_HAVE_INET6)
+    case AF_INET6:
+#endif
+        return 1;
+
+    default:
+        return 0;
+    }
 }
 
 
@@ -1091,7 +1316,7 @@ ngx_http_upstream_check_addr_change_port(ngx_pool_t *pool, ngx_addr_t *dst,
 
 
 void
-ngx_http_upstream_check_delete_dynamic_peer(ngx_str_t *name,
+ngx_upstream_check_delete_dynamic_peer(ngx_str_t *name,
     ngx_addr_t *peer_addr)
 {
     ngx_uint_t                            i;
@@ -1100,14 +1325,19 @@ ngx_http_upstream_check_delete_dynamic_peer(ngx_str_t *name,
 
     chosen = NULL;
     peers = check_peers_ctx;
+
+    if (peers == NULL) {
+        return;
+    }
+
     peer = peers->peers.elts;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                   "http upstream check delete dynamic upstream: %p, n: %ui",
+                   "upstream check delete dynamic upstream: %p, n: %ui",
                    peer, peers->peers.nelts);
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                   "http upstream check delete dynamic upstream: %V, "
+                   "upstream check delete dynamic upstream: %V, "
                    "peer: %V", name, &peer_addr->name);
 
     for (i = 0; i < peers->peers.nelts; i++) {
@@ -1161,9 +1391,18 @@ ngx_http_upstream_check_delete_dynamic_peer(ngx_str_t *name,
 }
 
 
+void
+ngx_http_upstream_check_delete_dynamic_peer(ngx_str_t *name,
+    ngx_addr_t *peer_addr)
+{
+    ngx_upstream_check_delete_dynamic_peer(name, peer_addr);
+}
+
+
 static ngx_uint_t
 ngx_http_upstream_check_add_dynamic_peer_shm(ngx_pool_t *pool,
-    ngx_http_upstream_check_srv_conf_t *ucscf, ngx_addr_t *peer_addr)
+    ngx_http_upstream_check_srv_conf_t *ucscf, ngx_str_t *upstream_name,
+    ngx_addr_t *peer_addr, ngx_uint_t protocol)
 {
     ngx_int_t                             rc;
     ngx_uint_t                            i, index;
@@ -1231,6 +1470,17 @@ ngx_http_upstream_check_add_dynamic_peer_shm(ngx_pool_t *pool,
 
     ngx_memcpy(peer_shm[index].sockaddr, peer_addr->sockaddr,
                peer_addr->socklen);
+
+    /*
+     * Record which upstream this peer belongs to, so that a later reload does
+     * not hand its state to an unrelated peer that happens to share the
+     * address. The merge loop above deliberately keeps looking at the address
+     * and the check request only: dynamically added peers sharing one record
+     * across upstreams is the behaviour this path always had.
+     */
+    peer_shm[index].upstream_hash =
+        ngx_http_upstream_check_upstream_hash(upstream_name);
+    peer_shm[index].protocol = protocol;
 
     rc = ngx_http_upstream_check_init_shm_peer(&peer_shm[index], NULL,
                                                ucscf->default_down, pool,
@@ -1316,7 +1566,7 @@ ngx_http_upstream_check_unique_peer(ngx_http_upstream_check_peers_t *peers,
 
 
 ngx_uint_t
-ngx_http_upstream_check_peer_down(ngx_uint_t index)
+ngx_upstream_check_peer_down(ngx_uint_t index)
 {
     ngx_http_upstream_check_peer_shm_t   *peer_shm;
 
@@ -1331,7 +1581,14 @@ ngx_http_upstream_check_peer_down(ngx_uint_t index)
 
 
 ngx_uint_t
-ngx_http_upstream_check_upstream_down(ngx_str_t *upstream)
+ngx_http_upstream_check_peer_down(ngx_uint_t index)
+{
+    return ngx_upstream_check_peer_down(index);
+}
+
+
+ngx_uint_t
+ngx_upstream_check_upstream_down(ngx_str_t *upstream)
 {
     ngx_uint_t i;
     ngx_http_upstream_check_peer_t *peers;
@@ -1355,9 +1612,16 @@ ngx_http_upstream_check_upstream_down(ngx_str_t *upstream)
 }
 
 
+ngx_uint_t
+ngx_http_upstream_check_upstream_down(ngx_str_t *upstream)
+{
+    return ngx_upstream_check_upstream_down(upstream);
+}
+
+
 /* TODO: this interface can count each peer's busyness */
 void
-ngx_http_upstream_check_get_peer(ngx_uint_t index)
+ngx_upstream_check_get_peer(ngx_uint_t index)
 {
     ngx_http_upstream_check_peer_t  *peer;
 
@@ -1377,7 +1641,14 @@ ngx_http_upstream_check_get_peer(ngx_uint_t index)
 
 
 void
-ngx_http_upstream_check_free_peer(ngx_uint_t index)
+ngx_http_upstream_check_get_peer(ngx_uint_t index)
+{
+    ngx_upstream_check_get_peer(index);
+}
+
+
+void
+ngx_upstream_check_free_peer(ngx_uint_t index)
 {
     ngx_http_upstream_check_peer_t  *peer;
 
@@ -1394,6 +1665,13 @@ ngx_http_upstream_check_free_peer(ngx_uint_t index)
     }
 
     ngx_shmtx_unlock(&peer[index].shm->mutex);
+}
+
+
+void
+ngx_http_upstream_check_free_peer(ngx_uint_t index)
+{
+    ngx_upstream_check_free_peer(index);
 }
 
 
@@ -1516,6 +1794,20 @@ ngx_http_upstream_check_begin_handler(ngx_event_t *event)
         return;
     }
 
+    /* 
+     * The current time maybe delayed(some operation take too long)
+     * We don't need to trigger the check event at this point.
+     */
+    if (ngx_current_msec < peer->shm->access_time) {
+        ngx_log_error(NGX_LOG_WARN, event->log, 0,
+                    "time maybe delayed, got current_msec:%M, shm_access_time:%M",
+                    ngx_current_msec, peer->shm->access_time);
+        return;
+    }
+
+    ngx_shmtx_lock(&peer->shm->mutex);
+
+    /* interval should be protected by mutex. */
     interval = ngx_current_msec - peer->shm->access_time;
     ngx_log_debug5(NGX_LOG_DEBUG_HTTP, event->log, 0,
                    "http check begin handler index: %ui, owner: %P, "
@@ -1523,8 +1815,6 @@ ngx_http_upstream_check_begin_handler(ngx_event_t *event)
                    peer->index, peer->shm->owner,
                    ngx_pid, interval,
                    ucscf->check_interval);
-
-    ngx_shmtx_lock(&peer->shm->mutex);
 
     if (peers_shm->generation != ngx_http_upstream_check_shm_generation) {
         ngx_shmtx_unlock(&peer->shm->mutex);
@@ -1574,7 +1864,22 @@ ngx_http_upstream_check_connect_handler(ngx_event_t *event)
 
     if (peer->pc.connection != NULL) {
         c = peer->pc.connection;
-        if ((rc = ngx_http_upstream_check_peek_one_byte(c)) == NGX_OK) {
+
+        /*
+         * Only reuse a connection whose previous response body was fully
+         * drained. If draining has not finished (recv_body_pending) -- e.g. a
+         * very large body between two checks -- reusing the socket would read
+         * leftover body bytes and corrupt this check's response parsing, so
+         * close it and reconnect instead.
+         *
+         * A datagram probe is never reused: MSG_PEEK on a UDP socket says
+         * nothing about the peer, and a fresh socket per check keeps a late
+         * reply to the previous probe from being read as this one's.
+         */
+        if (ucscf->check_type_conf->pc_type != SOCK_DGRAM
+            && !peer->recv_body_pending
+            && (rc = ngx_http_upstream_check_peek_one_byte(c)) == NGX_OK)
+        {
             goto upstream_check_connect_done;
         } else {
             ngx_close_connection(c);
@@ -1590,6 +1895,8 @@ ngx_http_upstream_check_connect_handler(ngx_event_t *event)
     peer->pc.get = ngx_event_get_peer;
     peer->pc.log = event->log;
     peer->pc.log_error = NGX_ERROR_ERR;
+
+    peer->pc.type = ucscf->check_type_conf->pc_type;
 
     peer->pc.cached = 0;
     peer->pc.connection = NULL;
@@ -1677,7 +1984,9 @@ static void
 ngx_http_upstream_check_discard_handler(ngx_event_t *event)
 {
     u_char                          buf[4096];
+    ngx_buf_t                       b;
     ssize_t                         size;
+    ngx_int_t                       rc;
     ngx_connection_t               *c;
     ngx_http_upstream_check_peer_t *peer;
 
@@ -1696,6 +2005,51 @@ ngx_http_upstream_check_discard_handler(ngx_event_t *event)
         size = c->recv(c, buf, 4096);
 
         if (size > 0) {
+            if (!peer->recv_body_pending) {
+                /*
+                 * Nothing is owed on this connection, so whatever arrived is
+                 * unsolicited. Keep discarding it as before.
+                 */
+                continue;
+            }
+
+            /*
+             * Finish draining the response body left over from the last check,
+             * tracking the framing so we know when the connection is clean
+             * again -- that is what lets connect_handler reuse it instead of
+             * reconnecting.
+             */
+            b.start = b.pos = buf;
+            b.last = b.end = buf + size;
+
+            rc = ngx_http_upstream_check_body_drain(&b,
+                                                    peer->recv_body_chunked,
+                                                    &peer->recv_chunk_state,
+                                                    &peer->recv_body_remaining);
+            if (rc == NGX_ERROR) {
+                ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                              "check peer sent a malformed response body, "
+                              "peer: %V ", &peer->check_peer_addr->name);
+                goto check_discard_fail;
+            }
+
+            if (rc == NGX_OK) {
+                peer->recv_body_pending = 0;
+
+                if (b.pos < b.last) {
+                    /*
+                     * Bytes beyond the end of the body: the peer is sending
+                     * something we never asked for, so the socket cannot be
+                     * trusted for the next check.
+                     */
+                    ngx_log_error(NGX_LOG_ERR, c->log, 0,
+                                  "check peer sent %z byte(s) past the response "
+                                  "body, peer: %V ", (ssize_t) (b.last - b.pos),
+                                  &peer->check_peer_addr->name);
+                    goto check_discard_fail;
+                }
+            }
+
             continue;
 
         } else if (size == NGX_AGAIN) {
@@ -1923,7 +2277,24 @@ ngx_http_upstream_check_recv_handler(ngx_event_t *event)
     switch (rc) {
 
     case NGX_AGAIN:
-        /* The peer has closed its half side of the connection. */
+        /*
+         * The response is not complete yet: the status line or headers have not
+         * fully arrived (the verdict never waits for the body). If the peer has
+         * already closed its half of the connection (EOF) the rest will never
+         * come, so fail the check instead of re-arming the read event and
+         * busy-looping on the readable EOF until the check times out. Otherwise
+         * keep the read event armed and wait for more data.
+         */
+        if (c->read->eof) {
+            ngx_log_error(NGX_LOG_ERR, event->log, 0,
+                          "check peer closed connection with an incomplete "
+                          "response, peer: %V ", &peer->check_peer_addr->name);
+            goto check_recv_fail;
+        }
+
+        if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+            goto check_recv_fail;
+        }
         return;
 
     case NGX_ERROR:
@@ -1973,6 +2344,15 @@ ngx_http_upstream_check_http_init(ngx_http_upstream_check_peer_t *peer)
 
     ngx_memzero(&ctx->status, sizeof(ngx_http_status_t));
 
+    ctx->parse_phase = NGX_CHECK_PARSE_STATUS_LINE;
+    ctx->code_n = 0;
+    ngx_memzero(&ctx->http_headers, sizeof(ngx_http_check_headers_ctx_t));
+
+    peer->recv_body_pending = 0;
+    peer->recv_body_remaining = 0;
+    peer->recv_chunk_state = sw_chunk_size;
+    peer->recv_body_chunked = 0;
+
     return NGX_OK;
 }
 
@@ -1981,18 +2361,28 @@ static ngx_int_t
 ngx_http_upstream_check_http_parse(ngx_http_upstream_check_peer_t *peer)
 {
     ngx_int_t                            rc;
+    ngx_buf_t                           *b;
     ngx_uint_t                           code, code_n;
+    ngx_connection_t                    *c;
+    ngx_check_conf_t                    *cf;
     ngx_http_upstream_check_ctx_t       *ctx;
     ngx_http_upstream_check_srv_conf_t  *ucscf;
 
     ucscf = peer->conf;
+    cf = ucscf->check_type_conf;
     ctx = peer->check_data;
+    b = &ctx->recv;
+    c = peer->pc.connection;
 
-    if ((ctx->recv.last - ctx->recv.pos) > 0) {
+    /* Phase 1: status line -> the health verdict is decided here */
 
-        rc = ngx_http_upstream_check_parse_status_line(ctx,
-                                                       &ctx->recv,
-                                                       &ctx->status);
+    if (ctx->parse_phase == NGX_CHECK_PARSE_STATUS_LINE) {
+
+        if ((b->last - b->pos) <= 0) {
+            return NGX_AGAIN;
+        }
+
+        rc = ngx_http_upstream_check_parse_status_line(ctx, b, &ctx->status);
         if (rc == NGX_AGAIN) {
             return rc;
         }
@@ -2013,13 +2403,13 @@ ngx_http_upstream_check_http_parse(ngx_http_upstream_check_peer_t *peer)
         } else if (code >= 300 && code < 400) {
             code_n = NGX_CHECK_HTTP_3XX;
         } else if (code >= 400 && code < 500) {
-            peer->pc.connection->error = 1;
+            c->error = 1;
             code_n = NGX_CHECK_HTTP_4XX;
         } else if (code >= 500 && code < 600) {
-            peer->pc.connection->error = 1;
+            c->error = 1;
             code_n = NGX_CHECK_HTTP_5XX;
         } else {
-            peer->pc.connection->error = 1;
+            c->error = 1;
             code_n = NGX_CHECK_HTTP_ERR;
         }
 
@@ -2027,16 +2417,122 @@ ngx_http_upstream_check_http_parse(ngx_http_upstream_check_peer_t *peer)
                        "http_parse: code_n: %ui, conf: %ui",
                        code_n, ucscf->code.status_alive);
 
-        if (code_n & ucscf->code.status_alive) {
-            return NGX_OK;
-        } else {
-            return NGX_ERROR;
+        ctx->code_n = code_n;
+
+        /*
+         * Fast path -- verdict straight from the status line, no body tracking,
+         * exactly as the original code. Taken when:
+         *   - keepalive reuse is off (socket closed right after; default config
+         *     is thus completely unaffected), or
+         *   - the connection is already marked not-reusable (c->error set for
+         *     4xx/5xx/invalid codes), so draining the body would be pointless.
+         */
+        if (!cf->need_keepalive
+            || ucscf->check_keepalive_requests <= 1
+            || c->error)
+        {
+            return (code_n & ucscf->code.status_alive) ? NGX_OK : NGX_ERROR;
         }
-    } else {
+
+        ctx->parse_phase = NGX_CHECK_PARSE_HEADERS;
+    }
+
+    /*
+     * Phase 2 (keepalive only): parse the headers to learn the body framing.
+     * The verdict does NOT wait for the body -- a healthy backend with a large
+     * or slow body must not be timed out. Once the headers are complete we
+     * consume whatever body bytes already arrived in the buffer (coalesced with
+     * the headers) and hand the remaining body length to the peer so the
+     * discard handler can finish draining it before the connection is reused.
+     */
+
+    rc = ngx_http_upstream_check_parse_headers(b, &ctx->http_headers);
+
+    if (rc == NGX_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, 0,
+                      "http parse headers error with peer: %V ",
+                      &peer->check_peer_addr->name);
+        return rc;
+    }
+
+    if (rc == NGX_AGAIN) {
+        /*
+         * Headers incomplete. Compact the receive buffer: keep only the
+         * unparsed tail so a fragmented header never accumulates and never
+         * triggers the buffer enlargement that would reset b->pos and corrupt
+         * the incremental header state held in ctx->http_headers.
+         */
+        if (b->pos < b->last) {
+            ngx_memmove(b->start, b->pos, b->last - b->pos);
+            b->last = b->start + (b->last - b->pos);
+        } else {
+            b->last = b->start;
+        }
+        b->pos = b->start;
         return NGX_AGAIN;
     }
 
-    return NGX_OK;
+    /* headers complete: set up body draining from the coalesced buffer bytes */
+
+    if (ctx->http_headers.bad_framing
+        || (ctx->http_headers.seen_te && !ctx->http_headers.chunked))
+    {
+        /*
+         * The body length is unknown: the Content-Length is invalid, or a
+         * Transfer-Encoding whose final coding is not chunked delimits the
+         * body by connection close. Do not reuse the connection.
+         */
+        c->error = 1;
+        peer->recv_body_pending = 0;
+        goto parse_done;
+    }
+
+    if (ctx->http_headers.chunked) {
+        peer->recv_body_chunked = 1;
+        peer->recv_chunk_state = sw_chunk_size;
+        peer->recv_body_remaining = 0;
+
+    } else if (ctx->http_headers.seen_cl) {
+        peer->recv_body_chunked = 0;
+        peer->recv_body_remaining = ctx->http_headers.content_length;
+
+    } else {
+        /*
+         * Neither Content-Length nor chunked: the body (if any) is delimited by
+         * connection close and cannot be drained for reuse. Drop keepalive on
+         * this connection so clean_event() closes it instead of reusing a
+         * possibly-dirty socket.
+         */
+        c->error = 1;
+        peer->recv_body_pending = 0;
+        goto parse_done;
+    }
+
+    rc = ngx_http_upstream_check_body_drain(b, peer->recv_body_chunked,
+                                            &peer->recv_chunk_state,
+                                            &peer->recv_body_remaining);
+    if (rc == NGX_ERROR) {
+        /*
+         * Malformed body framing. The verdict is already decided from the
+         * status line, but the connection cannot be reused safely.
+         */
+        c->error = 1;
+        peer->recv_body_pending = 0;
+
+    } else {
+        /*
+         * NGX_AGAIN means part of the body has not arrived yet; the discard
+         * handler installed by clean_event() drains the rest while the check is
+         * idle, and clears recv_body_pending once it is done.
+         */
+        peer->recv_body_pending = (rc == NGX_AGAIN);
+    }
+
+ parse_done:
+
+    ctx->parse_phase = NGX_CHECK_PARSE_DONE;
+
+    return (ctx->code_n & ucscf->code.status_alive) ? NGX_OK : NGX_ERROR;
 }
 
 
@@ -2767,6 +3263,16 @@ ngx_http_upstream_check_http_reinit(ngx_http_upstream_check_peer_t *peer)
     ctx->state = 0;
 
     ngx_memzero(&ctx->status, sizeof(ngx_http_status_t));
+
+    /*
+     * Reset only the parse state for the next check. The body drain state
+     * (peer->recv_body_*) is deliberately NOT reset here: the discard handler
+     * keeps draining the previous response's body after this reinit, and the
+     * parser rewrites the drain state on the next verdict.
+     */
+    ctx->parse_phase = NGX_CHECK_PARSE_STATUS_LINE;
+    ctx->code_n = 0;
+    ngx_memzero(&ctx->http_headers, sizeof(ngx_http_check_headers_ctx_t));
 }
 
 
@@ -2827,6 +3333,61 @@ ngx_http_upstream_check_ssl_hello_parse(ngx_http_upstream_check_peer_t *peer)
 
 static void
 ngx_http_upstream_check_ssl_hello_reinit(ngx_http_upstream_check_peer_t *peer)
+{
+    ngx_http_upstream_check_ctx_t *ctx;
+
+    ctx = peer->check_data;
+
+    ctx->send.pos = ctx->send.start;
+    ctx->send.last = ctx->send.end;
+
+    ctx->recv.pos = ctx->recv.last = ctx->recv.start;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_check_send_init(ngx_http_upstream_check_peer_t *peer)
+{
+    ngx_http_upstream_check_ctx_t       *ctx;
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    ctx = peer->check_data;
+    ucscf = peer->conf;
+
+    ctx->send.start = ctx->send.pos = (u_char *) ucscf->send.data;
+    ctx->send.end = ctx->send.last = ctx->send.start + ucscf->send.len;
+
+    ctx->recv.start = ctx->recv.pos = NULL;
+    ctx->recv.end = ctx->recv.last = NULL;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_check_send_parse(ngx_http_upstream_check_peer_t *peer)
+{
+    ngx_http_upstream_check_ctx_t       *ctx;
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    ctx = peer->check_data;
+    ucscf = peer->conf;
+
+    /*
+     * The verdict itself lives in ngx_upstream_check_send_parse.h so that it
+     * can be unit-tested without an nginx build. It never returns NGX_ERROR:
+     * a reply that does not (yet) contain the expected bytes leaves the peer
+     * undecided, and the check timeout is what fails it.
+     */
+    return ngx_upstream_check_send_verdict(ctx->recv.pos,
+                                           ctx->recv.last - ctx->recv.pos,
+                                           ucscf->expect.data,
+                                           ucscf->expect.len);
+}
+
+
+static void
+ngx_http_upstream_check_send_reinit(ngx_http_upstream_check_peer_t *peer)
 {
     ngx_http_upstream_check_ctx_t *ctx;
 
@@ -3323,6 +3884,22 @@ ngx_http_upstream_check_status_command_status(
 }
 
 
+/*
+ * Which side registered a peer. Peers of every protocol share one container,
+ * so the status page lists them together and this tells them apart. The field
+ * is reported last in every format, so that existing consumers parsing the
+ * CSV or JSON by position keep working.
+ */
+static ngx_str_t *
+ngx_http_upstream_check_protocol_name(ngx_uint_t protocol)
+{
+    static ngx_str_t  http_name = ngx_string("http");
+    static ngx_str_t  stream_name = ngx_string("stream");
+
+    return protocol == NGX_UPSTREAM_CHECK_STREAM ? &stream_name : &http_name;
+}
+
+
 static void
 ngx_http_upstream_check_status_html_format(ngx_buf_t *b,
     ngx_http_upstream_check_peers_t *peers, ngx_uint_t flag)
@@ -3378,6 +3955,7 @@ ngx_http_upstream_check_status_html_format(ngx_buf_t *b,
             "    <th>Fall counts</th>\n"
             "    <th>Check type</th>\n"
             "    <th>Check port</th>\n"
+            "    <th>Protocol</th>\n"
             "  </tr>\n",
             count, ngx_http_upstream_check_shm_generation);
 
@@ -3410,6 +3988,7 @@ ngx_http_upstream_check_status_html_format(ngx_buf_t *b,
                 "    <td>%ui</td>\n"
                 "    <td>%V</td>\n"
                 "    <td>%ui</td>\n"
+                "    <td>%V</td>\n"
                 "  </tr>\n",
                 peer[i].shm->down ? " bgcolor=\"#FF0000\"" : "",
                 i,
@@ -3419,7 +3998,8 @@ ngx_http_upstream_check_status_html_format(ngx_buf_t *b,
                 peer[i].shm->rise_count,
                 peer[i].shm->fall_count,
                 &peer[i].conf->check_type_conf->name,
-                peer[i].conf->port);
+                peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol));
     }
 
     b->last = ngx_snprintf(b->last, b->end - b->last,
@@ -3457,7 +4037,7 @@ ngx_http_upstream_check_status_csv_format(ngx_buf_t *b,
         }
 
         b->last = ngx_snprintf(b->last, b->end - b->last,
-                "%ui,%V,%V,%s,%ui,%ui,%V,%ui\n",
+                "%ui,%V,%V,%s,%ui,%ui,%V,%ui,%V\n",
                 i,
                 peer[i].upstream_name,
                 &peer[i].peer_addr->name,
@@ -3465,7 +4045,8 @@ ngx_http_upstream_check_status_csv_format(ngx_buf_t *b,
                 peer[i].shm->rise_count,
                 peer[i].shm->fall_count,
                 &peer[i].conf->check_type_conf->name,
-                peer[i].conf->port);
+                peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol));
     }
 }
 
@@ -3552,7 +4133,8 @@ ngx_http_upstream_check_status_json_format(ngx_buf_t *b,
                 "\"rise\": %ui, "
                 "\"fall\": %ui, "
                 "\"type\": \"%V\", "
-                "\"port\": %ui}"
+                "\"port\": %ui, "
+                "\"protocol\": \"%V\"}"
                 "%s\n",
                 i,
                 peer[i].upstream_name,
@@ -3562,6 +4144,7 @@ ngx_http_upstream_check_status_json_format(ngx_buf_t *b,
                 peer[i].shm->fall_count,
                 &peer[i].conf->check_type_conf->name,
                 peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol),
                 (last == count) ? "" : ",");
     }
 
@@ -3655,13 +4238,14 @@ ngx_http_upstream_check_status_prometheus_format(ngx_buf_t *b,
         }
 
         b->last = ngx_snprintf(b->last, b->end - b->last,
-                "nginx_upstream_server_rise{index=\"%ui\",upstream=\"%V\",name=\"%V\",status=\"%s\",type=\"%V\",port=\"%ui\"} %ui\n",
+                "nginx_upstream_server_rise{index=\"%ui\",upstream=\"%V\",name=\"%V\",status=\"%s\",type=\"%V\",port=\"%ui\",protocol=\"%V\"} %ui\n",
                 i,
                 peer[i].upstream_name,
                 &peer[i].peer_addr->name,
                 peer[i].shm->down ? "down" : "up",
                 &peer[i].conf->check_type_conf->name,
                 peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol),
                 peer[i].shm->rise_count);
     }
 
@@ -3689,13 +4273,14 @@ ngx_http_upstream_check_status_prometheus_format(ngx_buf_t *b,
         }
 
         b->last = ngx_snprintf(b->last, b->end - b->last,
-                "nginx_upstream_server_fall{index=\"%ui\",upstream=\"%V\",name=\"%V\",status=\"%s\",type=\"%V\",port=\"%ui\"} %ui\n",
+                "nginx_upstream_server_fall{index=\"%ui\",upstream=\"%V\",name=\"%V\",status=\"%s\",type=\"%V\",port=\"%ui\",protocol=\"%V\"} %ui\n",
                 i,
                 peer[i].upstream_name,
                 &peer[i].peer_addr->name,
                 peer[i].shm->down ? "down" : "up",
                 &peer[i].conf->check_type_conf->name,
                 peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol),
                 peer[i].shm->fall_count);
     }
 
@@ -3723,12 +4308,13 @@ ngx_http_upstream_check_status_prometheus_format(ngx_buf_t *b,
         }
 
         b->last = ngx_snprintf(b->last, b->end - b->last,
-                "nginx_upstream_server_active{index=\"%ui\",upstream=\"%V\",name=\"%V\",type=\"%V\",port=\"%ui\"} %ui\n",
+                "nginx_upstream_server_active{index=\"%ui\",upstream=\"%V\",name=\"%V\",type=\"%V\",port=\"%ui\",protocol=\"%V\"} %ui\n",
                 i,
                 peer[i].upstream_name,
                 &peer[i].peer_addr->name,
                 &peer[i].conf->check_type_conf->name,
                 peer[i].conf->port,
+                ngx_http_upstream_check_protocol_name(peer[i].protocol),
                 peer[i].shm->down ? 0 : 1);
     }
 }
@@ -3760,14 +4346,14 @@ ngx_http_get_check_type_conf(ngx_str_t *str)
 }
 
 
-static char *
-ngx_http_upstream_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+char *
+ngx_upstream_check_parse_directive(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf, ngx_uint_t protocol)
 {
     ngx_str_t                           *value, s;
     ngx_uint_t                           i, port, rise, fall, default_down, unique;
     ngx_msec_t                           interval, timeout;
     ngx_check_conf_t                    *check;
-    ngx_http_upstream_check_srv_conf_t  *ucscf;
 
     /* default values */
     port = 0;
@@ -3780,8 +4366,6 @@ ngx_http_upstream_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
-    ucscf = ngx_http_conf_get_module_srv_conf(cf,
-                                              ngx_http_upstream_check_module);
     if (ucscf == NULL) {
         return NGX_CONF_ERROR;
     }
@@ -3796,6 +4380,20 @@ ngx_http_upstream_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
             if (ucscf->check_type_conf == NULL) {
                 goto invalid_check_parameter;
+            }
+
+            /*
+             * Reject types that make no sense on this side, such as an HTTP
+             * request probe against a stream upstream.
+             */
+            if (!(ucscf->check_type_conf->protocols & protocol)) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "the \"%V\" check type is not supported "
+                                   "in %s upstreams",
+                                   &ucscf->check_type_conf->name,
+                                   protocol == NGX_UPSTREAM_CHECK_STREAM
+                                       ? "stream" : "http");
+                return NGX_CONF_ERROR;
             }
 
             continue;
@@ -3934,6 +4532,146 @@ invalid_check_parameter:
                        "invalid parameter \"%V\"", &value[i]);
 
     return NGX_CONF_ERROR;
+}
+
+
+static char *
+ngx_http_upstream_check(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    ucscf = ngx_http_conf_get_module_srv_conf(cf,
+                                              ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_parse_directive(cf, ucscf,
+                                             NGX_UPSTREAM_CHECK_HTTP);
+}
+
+
+/*
+ * Allocates and decodes a directive value. The decoding itself lives in
+ * ngx_upstream_check_send_parse.h so that it can be unit-tested without an
+ * nginx build; the output is never longer than the input.
+ */
+static ngx_int_t
+ngx_http_upstream_check_unescape(ngx_conf_t *cf, ngx_str_t *dst,
+    ngx_str_t *src)
+{
+    if (src->len == 0) {
+        dst->len = 0;
+        dst->data = NULL;
+        return NGX_OK;
+    }
+
+    dst->data = ngx_pnalloc(cf->pool, src->len);
+    if (dst->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_upstream_check_unescape_bytes(dst->data, &dst->len, src->data,
+                                      src->len);
+
+    return NGX_OK;
+}
+
+
+/*
+ * Both directives only make sense for a type that sends a payload of its own
+ * and judges the response by its bytes. A directive is always parsed before
+ * init_srv_conf runs, so check_type_conf here is either still unset or a valid
+ * entry of ngx_check_types -- never NULL.
+ */
+static ngx_int_t
+ngx_http_upstream_check_send_type_configured(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf, ngx_str_t *directive)
+{
+    if (ucscf->check_type_conf == NGX_CONF_UNSET_PTR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid %V, should set [check] first", directive);
+        return NGX_ERROR;
+    }
+
+    if (!(ucscf->check_type_conf->type & NGX_HTTP_CHECK_SEND)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid %V for check type \"%V\"", directive,
+                           &ucscf->check_type_conf->name);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+char *
+ngx_upstream_check_parse_send(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf)
+{
+    ngx_str_t  *value, directive = ngx_string("check_send");
+
+    value = cf->args->elts;
+
+    if (ngx_http_upstream_check_send_type_configured(cf, ucscf, &directive)
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_http_upstream_check_unescape(cf, &ucscf->send, &value[1])
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+char *
+ngx_upstream_check_parse_expect(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf)
+{
+    ngx_str_t  *value, directive = ngx_string("check_expect_response");
+
+    value = cf->args->elts;
+
+    if (ngx_http_upstream_check_send_type_configured(cf, ucscf, &directive)
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_http_upstream_check_unescape(cf, &ucscf->expect, &value[1])
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_http_upstream_check_send(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    ucscf = ngx_http_conf_get_module_srv_conf(cf,
+                                              ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_parse_send(cf, ucscf);
+}
+
+
+static char *
+ngx_http_upstream_check_expect_response(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    ucscf = ngx_http_conf_get_module_srv_conf(cf,
+                                              ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_parse_expect(cf, ucscf);
 }
 
 
@@ -4154,6 +4892,85 @@ ngx_http_upstream_check_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * Drops the per-configuration state once the pool holding the container is
+ * destroyed, which happens both when a reload fails and when the old cycle is
+ * finally torn down. Without this, a container left over from a failed reload
+ * would be picked up by the next one, whose cycle is regularly allocated at
+ * the very address the failed cycle had just freed: get_peers() would hand out
+ * freed memory and init_shm() would skip creating the zone altogether.
+ *
+ * The identity checks matter for the old-cycle teardown, which runs after the
+ * new configuration is already in place and must not clear its state.
+ */
+static void
+ngx_upstream_check_cleanup_peers(void *data)
+{
+    if (check_peers_cur == data) {
+        check_peers_cur = NULL;
+        check_peers_cycle = NULL;
+    }
+
+    if (check_peers_ctx == data) {
+        check_peers_ctx = NULL;
+    }
+}
+
+
+/*
+ * Returns the cycle's container of checked peers, creating it on the first
+ * call for a cycle. Both the HTTP and the stream module call this from their
+ * create_main_conf so that peers from either side end up in one container --
+ * one shared memory zone, one index space, one set of timers.
+ */
+void *
+ngx_upstream_check_get_peers(ngx_conf_t *cf)
+{
+    ngx_pool_cleanup_t               *cln;
+    ngx_http_upstream_check_peers_t  *peers;
+
+    if (check_peers_cycle == cf->cycle && check_peers_cur != NULL) {
+        return check_peers_cur;
+    }
+
+    peers = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_check_peers_t));
+    if (peers == NULL) {
+        return NULL;
+    }
+
+    cln = ngx_pool_cleanup_add(cf->pool, 0);
+    if (cln == NULL) {
+        return NULL;
+    }
+
+    cln->handler = ngx_upstream_check_cleanup_peers;
+    cln->data = peers;
+
+    peers->checksum = 0;
+
+#if (NGX_DEBUG)
+
+    if (ngx_array_init(&peers->peers, cf->pool, 1,
+                       sizeof(ngx_http_upstream_check_peer_t)) != NGX_OK)
+    {
+        return NULL;
+    }
+
+#else
+    if (ngx_array_init(&peers->peers, cf->pool, 1024,
+                       sizeof(ngx_http_upstream_check_peer_t)) != NGX_OK)
+    {
+        return NULL;
+    }
+#endif
+
+    check_peers_cur = peers;
+    check_peers_cycle = cf->cycle;
+
+    return peers;
+}
+
+
 static void *
 ngx_http_upstream_check_create_main_conf(ngx_conf_t *cf)
 {
@@ -4164,29 +4981,10 @@ ngx_http_upstream_check_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    ucmcf->peers = ngx_pcalloc(cf->pool,
-                               sizeof(ngx_http_upstream_check_peers_t));
+    ucmcf->peers = ngx_upstream_check_get_peers(cf);
     if (ucmcf->peers == NULL) {
         return NULL;
     }
-
-    ucmcf->peers->checksum = 0;
-
-#if (NGX_DEBUG)
-
-    if (ngx_array_init(&ucmcf->peers->peers, cf->pool, 1,
-                       sizeof(ngx_http_upstream_check_peer_t)) != NGX_OK)
-    {
-        return NULL;
-    }
-
-#else
-    if (ngx_array_init(&ucmcf->peers->peers, cf->pool, 1024,
-                       sizeof(ngx_http_upstream_check_peer_t)) != NGX_OK)
-    {
-        return NULL;
-    }
-#endif
 
     return ucmcf;
 }
@@ -4301,10 +5099,11 @@ ngx_http_upstream_check_create_fastcgi_request(ngx_pool_t *pool,
 static char *
 ngx_http_upstream_check_init_main_conf(ngx_conf_t *cf, void *conf)
 {
-    ngx_buf_t                      *b;
-    ngx_uint_t                      i;
-    ngx_http_upstream_srv_conf_t  **uscfp;
-    ngx_http_upstream_main_conf_t  *umcf;
+    ngx_buf_t                            *b;
+    ngx_uint_t                            i;
+    ngx_http_upstream_srv_conf_t        **uscfp;
+    ngx_http_upstream_main_conf_t        *umcf;
+    ngx_http_upstream_check_main_conf_t  *ucmcf;
 
     umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
 
@@ -4328,12 +5127,14 @@ ngx_http_upstream_check_init_main_conf(ngx_conf_t *cf, void *conf)
         }
     }
 
-    return ngx_http_upstream_check_init_shm(cf, conf);
+    ucmcf = conf;
+
+    return ngx_upstream_check_init_shm(cf, ucmcf->check_shm_size);
 }
 
 
-static void *
-ngx_http_upstream_check_create_srv_conf(ngx_conf_t *cf)
+ngx_upstream_check_srv_conf_t *
+ngx_upstream_check_create_srv_conf(ngx_conf_t *cf)
 {
     ngx_http_upstream_check_srv_conf_t  *ucscf;
 
@@ -4359,6 +5160,13 @@ ngx_http_upstream_check_create_srv_conf(ngx_conf_t *cf)
 
 
 static void *
+ngx_http_upstream_check_create_srv_conf(ngx_conf_t *cf)
+{
+    return ngx_upstream_check_create_srv_conf(cf);
+}
+
+
+static void *
 ngx_http_upstream_check_create_loc_conf(ngx_conf_t *cf)
 {
     ngx_http_upstream_check_loc_conf_t  *uclcf;
@@ -4374,20 +5182,13 @@ ngx_http_upstream_check_create_loc_conf(ngx_conf_t *cf)
 }
 
 
-static char *
-ngx_http_upstream_check_init_srv_conf(ngx_conf_t *cf, void *conf)
+char *
+ngx_upstream_check_init_srv_conf(ngx_conf_t *cf,
+    ngx_upstream_check_srv_conf_t *ucscf, ngx_uint_t protocol)
 {
     ngx_str_t                           s;
     ngx_buf_t                          *b;
     ngx_check_conf_t                   *check;
-    ngx_http_upstream_srv_conf_t       *us = conf;
-    ngx_http_upstream_check_srv_conf_t *ucscf;
-
-    if (us->srv_conf == NULL) {
-        return NGX_CONF_OK;
-    }
-
-    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
 
     if (ucscf->port == NGX_CONF_UNSET_UINT) {
         ucscf->port = 0;
@@ -4423,7 +5224,10 @@ ngx_http_upstream_check_init_srv_conf(ngx_conf_t *cf, void *conf)
         if (ucscf->send.len == 0) {
             ngx_str_set(&s, "fastcgi");
 
-            if (check == ngx_http_get_check_type_conf(&s)) {
+            /* the fastcgi type is only reachable from the HTTP side */
+            if (protocol == NGX_UPSTREAM_CHECK_HTTP
+                && check == ngx_http_get_check_type_conf(&s))
+            {
 
                 if (ucscf->fastcgi_params->nelts == 0) {
                     ucscf->send.data = fastcgi_default_request.data;
@@ -4457,6 +5261,23 @@ ngx_http_upstream_check_init_srv_conf(ngx_conf_t *cf, void *conf)
 
 
 static char *
+ngx_http_upstream_check_init_srv_conf(ngx_conf_t *cf, void *conf)
+{
+    ngx_http_upstream_srv_conf_t        *us = conf;
+    ngx_http_upstream_check_srv_conf_t  *ucscf;
+
+    if (us->srv_conf == NULL) {
+        return NGX_CONF_OK;
+    }
+
+    ucscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_check_module);
+
+    return ngx_upstream_check_init_srv_conf(cf, ucscf,
+                                           NGX_UPSTREAM_CHECK_HTTP);
+}
+
+
+static char *
 ngx_http_upstream_check_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child)
 {
@@ -4471,38 +5292,110 @@ ngx_http_upstream_check_merge_loc_conf(ngx_conf_t *cf, void *parent,
 }
 
 
-static char *
-ngx_http_upstream_check_init_shm(ngx_conf_t *cf, void *conf)
+/*
+ * Smallest zone that can hold the whole shared peer table: one record per
+ * configured peer, MAX_DYNAMIC_PEER spare records for peers added at runtime,
+ * a copy of the address of every one of them, and the slab pool's own
+ * overhead. The addresses of the spare records are counted too: they are
+ * allocated from this zone as peers appear, and a zone that only fits the
+ * records would let the table grow but not the addresses that go with it.
+ */
+static ngx_uint_t
+ngx_upstream_check_shm_min_size(ngx_uint_t number)
 {
-    ngx_str_t                            *shm_name;
-    ngx_uint_t                            shm_size;
-    ngx_shm_zone_t                       *shm_zone;
-    ngx_http_upstream_check_main_conf_t  *ucmcf = conf;
+    ngx_uint_t  size, slots;
+
+    slots = number + MAX_DYNAMIC_PEER;
+
+    size = sizeof(ngx_http_upstream_check_peers_shm_t)
+           + (slots - 1) * sizeof(ngx_http_upstream_check_peer_shm_t)
+           + slots * ngx_align(sizeof(struct sockaddr_storage), NGX_ALIGNMENT);
+
+    /*
+     * The slab pool spends the head of the zone on its own header, the
+     * per-size slot lists and one ngx_slab_page_t per page, then aligns the
+     * first allocatable page up to a page boundary. One spare page covers the
+     * header, the lists and that rounding.
+     */
+    size += (size / ngx_pagesize) * sizeof(ngx_slab_page_t) + ngx_pagesize;
+
+    return ngx_align(size, ngx_pagesize);
+}
+
+
+char *
+ngx_upstream_check_init_shm(ngx_conf_t *cf, ngx_uint_t shm_size)
+{
+    ngx_str_t                        *shm_name;
+    ngx_uint_t                        size;
+    ngx_shm_zone_t                   *shm_zone;
+    ngx_http_upstream_check_peers_t  *peers;
+
+    peers = ngx_upstream_check_get_peers(cf);
+    if (peers == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    /*
+     * The zone has to fit what ngx_http_upstream_check_init_shm_zone() is
+     * about to allocate out of it, so derive the floor from that instead of
+     * hardcoding one. The reservation for peers added at runtime alone is
+     * already close to a megabyte on 64-bit, which used to leave the old 1M
+     * default less than a page of slack: a per-peer record growing by a few
+     * bytes, or a host with larger pages, pushed the very first allocation
+     * past the end of the zone. That failure is fatal and independent of the
+     * configuration -- the reservation is made even when nothing is checked,
+     * so every configuration that merely links this module stopped starting.
+     */
+    size = ngx_upstream_check_shm_min_size(peers->peers.nelts);
+
+    /*
+     * Both sides may configure "check_shm_size"; the zone is sized by the
+     * larger of the two, whichever side got here first.
+     */
+    if (shm_size > peers->shm_size_hint) {
+        peers->shm_size_hint = shm_size;
+    }
+
+    if (size < peers->shm_size_hint) {
+        size = peers->shm_size_hint;
+    }
+
+    /*
+     * Only the first side to reach this point for a configuration creates the
+     * zone. Bumping the generation twice would break the reload path, which
+     * looks the previous zone up by "generation - 1" to inherit peer health:
+     * the lookup would miss and every peer would fall back to default_down and
+     * be probed from scratch.
+     */
+    if (peers->shm_zone != NULL) {
+        peers->shm_zone->shm.size = size;
+        return NGX_CONF_OK;
+    }
 
     ngx_http_upstream_check_shm_generation++;
 
-    shm_name = &ucmcf->peers->check_shm_name;
+    shm_name = &peers->check_shm_name;
 
     ngx_http_upstream_check_get_shm_name(shm_name, cf->pool,
                                 ngx_http_upstream_check_shm_generation);
 
-    /* The default check shared memory size is 1M */
-    shm_size = 1 * 1024 * 1024;
-
-    shm_size = shm_size < ucmcf->check_shm_size ?
-                          ucmcf->check_shm_size : shm_size;
-
-    shm_zone = ngx_shared_memory_add(cf, shm_name, shm_size,
+    shm_zone = ngx_shared_memory_add(cf, shm_name, size,
                                      &ngx_http_upstream_check_module);
+    if (shm_zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, cf->log, 0,
-                   "http upstream check, upsteam:%V, shm_zone size:%ui",
-                   shm_name, shm_size);
+                   "upstream check, upsteam:%V, shm_zone size:%ui",
+                   shm_name, size);
 
     shm_zone->data = cf->pool;
-    check_peers_ctx = ucmcf->peers;
+    check_peers_ctx = peers;
 
     shm_zone->init = ngx_http_upstream_check_init_shm_zone;
+
+    peers->shm_zone = shm_zone;
 
     return NGX_CONF_OK;
 }
@@ -4632,10 +5525,16 @@ ngx_http_upstream_check_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data)
         ngx_memcpy(peer_shm->sockaddr, peer[i].peer_addr->sockaddr,
                    peer_shm->socklen);
 
+        peer_shm->upstream_hash =
+            ngx_http_upstream_check_upstream_hash(peer[i].upstream_name);
+        peer_shm->protocol = peer[i].protocol;
+
         if (opeers_shm) {
 
             opeer_shm = ngx_http_upstream_check_find_shm_peer(opeers_shm,
-                                                             peer[i].peer_addr);
+                                                    peer[i].peer_addr,
+                                                    peer_shm->upstream_hash,
+                                                    peer_shm->protocol);
             if (opeer_shm) {
                 ngx_log_debug1(NGX_LOG_DEBUG_HTTP, shm_zone->shm.log, 0,
                                "http upstream check, inherit opeer: %V ",
@@ -4716,9 +5615,16 @@ ngx_shared_memory_find(ngx_cycle_t *cycle, ngx_str_t *name, void *tag)
 }
 
 
+static ngx_uint_t
+ngx_http_upstream_check_upstream_hash(ngx_str_t *upstream_name)
+{
+    return ngx_murmur_hash2(upstream_name->data, upstream_name->len);
+}
+
+
 static ngx_http_upstream_check_peer_shm_t *
 ngx_http_upstream_check_find_shm_peer(ngx_http_upstream_check_peers_shm_t *p,
-    ngx_addr_t *addr)
+    ngx_addr_t *addr, ngx_uint_t upstream_hash, ngx_uint_t protocol)
 {
     ngx_uint_t                          i;
     ngx_http_upstream_check_peer_shm_t *peer_shm;
@@ -4726,6 +5632,12 @@ ngx_http_upstream_check_find_shm_peer(ngx_http_upstream_check_peers_shm_t *p,
     for (i = 0; i < p->number; i++) {
 
         peer_shm = &p->peers[i];
+
+        if (peer_shm->upstream_hash != upstream_hash
+            || peer_shm->protocol != protocol)
+        {
+            continue;
+        }
 
         if (addr->socklen != peer_shm->socklen) {
             continue;
@@ -4797,12 +5709,13 @@ ngx_http_upstream_check_init_shm_peer(ngx_http_upstream_check_peer_shm_t *psh,
 static ngx_int_t
 ngx_http_upstream_check_init_process(ngx_cycle_t *cycle)
 {
-    ngx_http_upstream_check_main_conf_t *ucmcf;
-
-    ucmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_check_module);
-    if (ucmcf == NULL) {
-        return NGX_OK;
-    }
-
+    /*
+     * The timers are registered from this side only, for peers of every
+     * protocol: they all live in one container, which add_timers() reaches
+     * through check_peers_ctx and which is empty when nothing is checked.
+     * Do not gate this on the HTTP main configuration -- a configuration with
+     * a stream{} block but no http{} block has none, and its stream peers
+     * would never be probed.
+     */
     return ngx_http_upstream_check_add_timers(cycle);
 }

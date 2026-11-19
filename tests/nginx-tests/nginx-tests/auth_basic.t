@@ -23,7 +23,7 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http auth_basic/)->plan(21)
+my $t = Test::Nginx->new()->has(qw/http auth_basic/)->plan(25)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -48,6 +48,12 @@ http {
                 auth_basic off;
                 alias %%TESTDIR%%/;
             }
+
+            location /var {
+                # prepended with conf_prefix
+                auth_basic_user_file $arg_f;
+                alias %%TESTDIR%%/;
+            }
         }
     }
 }
@@ -58,8 +64,8 @@ $t->write_file('index.html', 'SEETHIS');
 
 $t->write_file(
 	'htpasswd',
-	'crypt:' . crypt('password', 'salt') . "\n" .
-	'crypt1:' . crypt('password', '$1$salt$') . "\n" .
+	'crypt:' . (crypt('password', 'salt') || '') . "\n" .
+	'crypt1:' . (crypt('password', '$1$salt$') || '') . "\n" .
 	'crypt2:' . '$1$' . "\n" .
 	'apr1:' . '$apr1$salt$Xxd1irWT9ycqoYxGFn4cb.' . "\n" .
 	'apr12:' . '$apr1$' . "\n" .
@@ -69,7 +75,8 @@ $t->write_file(
 	'ssha3:' . '{SSHA}Zm9vCg==' . "\n" .
 	'sha:' . '{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=' . "\n" .
 	'sha2:' . '{SHA}_____Mm5Pz8GgiULbPgzG37mj9g=' . "\n" .
-	'sha3:' . '{SHA}Zm9vCg==' . "\n"
+	'sha3:' . '{SHA}Zm9vCg==' . "\n" .
+	'plain2:' . '{PLAIN}password'
 );
 
 $t->run();
@@ -109,8 +116,16 @@ like(http_get_auth('/', 'ssha3', '1'), qr!401 Unauthorized!, 'ssha broken 2');
 like(http_get_auth('/', 'sha2', '1'), qr!401 Unauthorized!, 'sha broken 1');
 like(http_get_auth('/', 'sha3', '1'), qr!401 Unauthorized!, 'sha broken 2');
 
+like(http_get_auth('/', 'plain2', 'password'), qr!SEETHIS!, 'no newline');
 like(http_get_auth('/', 'notfound', '1'), qr!401 Unauthorized!, 'not found');
 like(http_get('/inner/'), qr!SEETHIS!, 'inner off');
+
+like(http_get_auth('/var/?f=htpasswd', 'apr1', 'password'), qr!SEETHIS!,
+	'user file variable');
+unlike(http_get_auth('/var/?f=nx', 'apr1', 'password'), qr!SEETHIS!,
+	'user file variable not found');
+unlike(http_get_auth('/var/', 'apr1', 'password'), qr!SEETHIS!,
+	'user file variable bad value');
 
 ###############################################################################
 

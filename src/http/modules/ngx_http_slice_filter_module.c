@@ -165,8 +165,8 @@ ngx_http_slice_header_filter(ngx_http_request_t *r)
 
     if (cr.start != ctx->start || cr.end != end) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "unexpected range in slice response: %O-%O",
-                      cr.start, cr.end);
+                      "unexpected range in slice response: %O-%O, "
+                      "expected: %O-%O", cr.start, cr.end, ctx->start, end);
         return NGX_ERROR;
     }
 
@@ -179,6 +179,11 @@ ngx_http_slice_header_filter(ngx_http_request_t *r)
     r->headers_out.content_offset = cr.start;
     r->headers_out.content_range->hash = 0;
     r->headers_out.content_range = NULL;
+
+    if (r->headers_out.accept_ranges) {
+        r->headers_out.accept_ranges->hash = 0;
+        r->headers_out.accept_ranges = NULL;
+    }
 
     r->allow_ranges = 1;
     r->subrequest_ranges = 1;
@@ -414,14 +419,18 @@ ngx_http_slice_range_variable(ngx_http_request_t *r,
             return NGX_ERROR;
         }
 
-        ngx_http_set_ctx(r, ctx, ngx_http_slice_filter_module);
-
         p = ngx_pnalloc(r->pool, sizeof("bytes=-") - 1 + 2 * NGX_OFF_T_LEN);
         if (p == NULL) {
             return NGX_ERROR;
         }
 
+        ngx_http_set_ctx(r, ctx, ngx_http_slice_filter_module);
+
         ctx->start = slcf->size * (ngx_http_slice_get_start(r) / slcf->size);
+
+        if (ctx->start > NGX_MAX_OFF_T_VALUE - (off_t) slcf->size) {
+            ctx->start = 0;
+        }
 
         ctx->range.data = p;
         ctx->range.len = ngx_sprintf(p, "bytes=%O-%O", ctx->start,

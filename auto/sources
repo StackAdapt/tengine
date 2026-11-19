@@ -25,6 +25,7 @@ CORE_DEPS="src/core/nginx.h \
            src/core/ngx_crc.h \
            src/core/ngx_crc32.h \
            src/core/ngx_murmurhash.h \
+           src/core/ngx_siphash.h \
            src/core/ngx_md5.h \
            src/core/ngx_sha1.h \
            src/core/ngx_rbtree.h \
@@ -42,6 +43,10 @@ CORE_DEPS="src/core/nginx.h \
            src/core/ngx_resolver.h \
            src/core/ngx_open_file_cache.h \
            src/core/ngx_crypt.h \
+           src/core/ngx_data.h \
+           src/core/ngx_json.h \
+           src/core/ngx_json_parse.h \
+           src/core/ngx_json_unescape.h \
            src/core/ngx_proxy_protocol.h \
            src/core/ngx_syslog.h"
 
@@ -62,6 +67,7 @@ CORE_SRCS="src/core/nginx.c \
            src/core/ngx_file.c \
            src/core/ngx_crc32.c \
            src/core/ngx_murmurhash.c \
+           src/core/ngx_siphash.c \
            src/core/ngx_md5.c \
            src/core/ngx_sha1.c \
            src/core/ngx_rbtree.c \
@@ -81,6 +87,10 @@ CORE_SRCS="src/core/nginx.c \
            src/core/ngx_resolver.c \
            src/core/ngx_open_file_cache.c \
            src/core/ngx_crypt.c \
+           src/core/ngx_data.c \
+           src/core/ngx_json.c \
+           src/core/ngx_json_parse.c \
+           src/core/ngx_json_unescape.c \
            src/core/ngx_proxy_protocol.c \
            src/core/ngx_syslog.c"
 
@@ -93,7 +103,9 @@ EVENT_DEPS="src/event/ngx_event.h \
             src/event/ngx_event_timer.h \
             src/event/ngx_event_posted.h \
             src/event/ngx_event_connect.h \
-            src/event/ngx_event_pipe.h"
+            src/event/ngx_event_pipe.h \
+	    src/event/ngx_event_udp.h \
+            src/event/ngx_event_udpv2.h"
 
 EVENT_SRCS="src/event/ngx_event.c \
             src/event/ngx_event_timer.c \
@@ -101,7 +113,8 @@ EVENT_SRCS="src/event/ngx_event.c \
             src/event/ngx_event_accept.c \
             src/event/ngx_event_udp.c \
             src/event/ngx_event_connect.c \
-            src/event/ngx_event_pipe.c"
+            src/event/ngx_event_pipe.c  \
+            src/event/ngx_event_udpv2.c"
 
 
 SELECT_MODULE=ngx_select_module
@@ -123,9 +136,6 @@ EVENTPORT_SRCS=src/event/modules/ngx_eventport_module.c
 
 EPOLL_MODULE=ngx_epoll_module
 EPOLL_SRCS=src/event/modules/ngx_epoll_module.c
-
-IOCP_MODULE=ngx_iocp_module
-IOCP_SRCS=src/event/modules/ngx_iocp_module.c
 
 
 PROCS_MODULES="ngx_procs_module ngx_proc_core_module"
@@ -197,6 +207,9 @@ UNIX_SRCS="$CORE_SRCS $EVENT_SRCS \
             src/os/unix/ngx_sysinfo.c \
             src/os/unix/ngx_process_cycle.c"
 
+UNIX_CONTROL_API_DEPS=src/os/unix/ngx_control.h
+UNIX_CONTROL_API_SRCS=src/os/unix/ngx_control.c
+
 POSIX_DEPS=src/os/unix/ngx_posix_config.h
 
 THREAD_POOL_MODULE=ngx_thread_pool_module
@@ -263,8 +276,7 @@ WIN32_SRCS="$CORE_SRCS $EVENT_SRCS \
             src/os/win32/ngx_user.c \
             src/os/win32/ngx_dlopen.c \
             src/os/win32/ngx_event_log.c \
-            src/os/win32/ngx_process_cycle.c \
-            src/event/ngx_event_acceptex.c"
+            src/os/win32/ngx_process_cycle.c"
 
 NGX_WIN32_ICONS="src/os/win32/nginx.ico"
 NGX_WIN32_RC="src/os/win32/nginx.rc"
@@ -272,7 +284,11 @@ NGX_WIN32_RC="src/os/win32/nginx.rc"
 
 HTTP_FILE_CACHE_SRCS=src/http/ngx_http_file_cache.c
 
+HTTP_HUFF_SRCS="src/http/ngx_http_huff_decode.c
+                src/http/ngx_http_huff_encode.c"
 
+HTTP_PRIORITY_DEPS=src/http/ngx_http_priority.h
+HTTP_PRIORITY_SRCS=src/http/ngx_http_priority.c
 
 NGX_HTTP_LUA_MODULE=ngx_http_lua_module
 NGX_HTTP_LUA_MODULE_SRCS="modules/ngx_http_lua_module/src/ngx_http_lua_script.c \

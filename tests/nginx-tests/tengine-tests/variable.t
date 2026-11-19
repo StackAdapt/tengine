@@ -1,5 +1,7 @@
 #!/usr/bin/perl
 
+# Copyright (C) 2013 Alibaba Group Holding Limited
+
 # Tests for variable
 
 ###############################################################################
@@ -26,8 +28,6 @@ $t->write_file_expand('nginx.conf', <<'EOF');
 %%TEST_GLOBALS%%
 
 daemon         off;
-
-%%TEST_GLOBALS_DSO%%
 
 events {
 }

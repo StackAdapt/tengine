@@ -25,6 +25,8 @@ use Test::Nginx::SMTP;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
+local $SIG{PIPE} = 'IGNORE';
+
 my $t = Test::Nginx->new()->has(qw/mail mail_ssl imap pop3 smtp/)
 	->has_daemon('openssl')->plan(17);
 
@@ -103,7 +105,7 @@ EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]

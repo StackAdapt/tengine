@@ -47,6 +47,9 @@ static ngx_int_t ngx_http_dav_mkcol_handler(ngx_http_request_t *r,
     ngx_http_dav_loc_conf_t *dlcf);
 
 static ngx_int_t ngx_http_dav_copy_move_handler(ngx_http_request_t *r);
+static void ngx_http_dav_merge_slashes(ngx_str_t *path);
+static ngx_int_t ngx_http_dav_validate_paths(ngx_http_request_t *r,
+    ngx_str_t *src, ngx_str_t *dst, ngx_uint_t slash, ngx_table_elt_t *dest);
 static ngx_int_t ngx_http_dav_copy_dir(ngx_tree_ctx_t *ctx, ngx_str_t *path);
 static ngx_int_t ngx_http_dav_copy_dir_time(ngx_tree_ctx_t *ctx,
     ngx_str_t *path);
@@ -56,7 +59,7 @@ static ngx_int_t ngx_http_dav_copy_tree_file(ngx_tree_ctx_t *ctx,
 static ngx_int_t ngx_http_dav_depth(ngx_http_request_t *r, ngx_int_t dflt);
 static ngx_int_t ngx_http_dav_error(ngx_log_t *log, ngx_err_t err,
     ngx_int_t not_found, char *failed, u_char *path);
-static ngx_int_t ngx_http_dav_location(ngx_http_request_t *r, u_char *path);
+static ngx_int_t ngx_http_dav_location(ngx_http_request_t *r);
 static void *ngx_http_dav_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_dav_merge_loc_conf(ngx_conf_t *cf,
     void *parent, void *child);
@@ -285,7 +288,7 @@ ngx_http_dav_put_handler(ngx_http_request_t *r)
     }
 
     if (status == NGX_HTTP_CREATED) {
-        if (ngx_http_dav_location(r, path.data) != NGX_OK) {
+        if (ngx_http_dav_location(r) != NGX_OK) {
             ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
             return;
         }
@@ -312,7 +315,7 @@ ngx_http_dav_delete_handler(ngx_http_request_t *r)
     ngx_file_info_t           fi;
     ngx_http_dav_loc_conf_t  *dlcf;
 
-    if (r->headers_in.content_length_n > 0) {
+    if (r->headers_in.content_length_n > 0 || r->headers_in.chunked) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "DELETE with body is unsupported");
         return NGX_HTTP_UNSUPPORTED_MEDIA_TYPE;
@@ -495,7 +498,7 @@ ngx_http_dav_mkcol_handler(ngx_http_request_t *r, ngx_http_dav_loc_conf_t *dlcf)
     size_t     root;
     ngx_str_t  path;
 
-    if (r->headers_in.content_length_n > 0) {
+    if (r->headers_in.content_length_n > 0 || r->headers_in.chunked) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "MKCOL with body is unsupported");
         return NGX_HTTP_UNSUPPORTED_MEDIA_TYPE;
@@ -513,7 +516,6 @@ ngx_http_dav_mkcol_handler(ngx_http_request_t *r, ngx_http_dav_loc_conf_t *dlcf)
     }
 
     *(p - 1) = '\0';
-    r->uri.len--;
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http mkcol path: \"%s\"", path.data);
@@ -521,7 +523,7 @@ ngx_http_dav_mkcol_handler(ngx_http_request_t *r, ngx_http_dav_loc_conf_t *dlcf)
     if (ngx_create_dir(path.data, ngx_dir_access(dlcf->access))
         != NGX_FILE_ERROR)
     {
-        if (ngx_http_dav_location(r, path.data) != NGX_OK) {
+        if (ngx_http_dav_location(r) != NGX_OK) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
 
@@ -536,21 +538,24 @@ ngx_http_dav_mkcol_handler(ngx_http_request_t *r, ngx_http_dav_loc_conf_t *dlcf)
 static ngx_int_t
 ngx_http_dav_copy_move_handler(ngx_http_request_t *r)
 {
-    u_char                   *p, *host, *last, ch;
-    size_t                    len, root;
-    ngx_err_t                 err;
-    ngx_int_t                 rc, depth;
-    ngx_uint_t                overwrite, slash, dir, flags;
-    ngx_str_t                 path, uri, duri, args;
-    ngx_tree_ctx_t            tree;
-    ngx_copy_file_t           cf;
-    ngx_file_info_t           fi;
-    ngx_table_elt_t          *dest, *over;
-    ngx_ext_rename_file_t     ext;
-    ngx_http_dav_copy_ctx_t   copy;
-    ngx_http_dav_loc_conf_t  *dlcf;
+    u_char                    *p, *host, *last, ch;
+    size_t                     len, root, alias;
+    ngx_err_t                  err;
+    ngx_int_t                  rc, depth;
+    ngx_uint_t                 overwrite, slash, dir, flags;
+    ngx_str_t                  path, uri, duri, args;
+    ngx_tree_ctx_t             tree;
+    ngx_copy_file_t            cf;
+    ngx_file_info_t            fi;
+    ngx_table_elt_t           *dest, *over;
+    ngx_ext_rename_file_t      ext;
+    ngx_http_dav_copy_ctx_t    copy;
+    ngx_http_dav_loc_conf_t   *dlcf;
+    ngx_http_core_loc_conf_t  *clcf;
 
-    if (r->headers_in.content_length_n > 0) {
+    if (r->headers_in.content_length_n > 0 || r->headers_in.chunked) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "COPY and MOVE with body are unsupported");
         return NGX_HTTP_UNSUPPORTED_MEDIA_TYPE;
     }
 
@@ -643,6 +648,22 @@ destination_done:
         return NGX_HTTP_CONFLICT;
     }
 
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    alias = clcf->alias;
+
+    if (alias && alias != NGX_MAX_SIZE_T_VALUE && r->valid_location) {
+
+        if (alias > duri.len
+            || ngx_filename_cmp(duri.data, r->uri.data, alias) != 0)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "\"Destination\" URI \"%V\" must be "
+                          "within location prefix when using \"alias\"",
+                          &dest->value);
+            return NGX_HTTP_BAD_REQUEST;
+        }
+    }
+
     depth = ngx_http_dav_depth(r, NGX_HTTP_DAV_INFINITY_DEPTH);
 
     if (depth != NGX_HTTP_DAV_INFINITY_DEPTH) {
@@ -700,10 +721,14 @@ overwrite_done:
     r->uri = duri;
 
     if (ngx_http_map_uri_to_path(r, &copy.path, &root, 0) == NULL) {
+        r->uri = uri;
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
     r->uri = uri;
+
+    ngx_http_dav_merge_slashes(&path);
+    ngx_http_dav_merge_slashes(&copy.path);
 
     copy.path.len--;  /* omit "\0" */
 
@@ -718,6 +743,12 @@ overwrite_done:
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http copy to: \"%s\"", copy.path.data);
+
+    if (ngx_http_dav_validate_paths(r, &path, &copy.path, slash, dest)
+        != NGX_OK)
+    {
+        return NGX_HTTP_FORBIDDEN;
+    }
 
     if (ngx_link_info(copy.path.data, &fi) == NGX_FILE_ERROR) {
         err = ngx_errno;
@@ -853,6 +884,65 @@ overwrite_done:
     }
 
     return NGX_HTTP_INTERNAL_SERVER_ERROR;
+}
+
+
+static void
+ngx_http_dav_merge_slashes(ngx_str_t *path)
+{
+    u_char  *p, *q;
+
+    p = path->data;
+    q = path->data;
+
+    while (*p) {
+        *q++ = *p;
+
+        if (*p++ == '/') {
+            while (*p == '/') {
+                p++;
+            }
+        }
+    }
+
+    *q++ = '\0';
+    path->len = q - path->data;
+}
+
+
+static ngx_int_t
+ngx_http_dav_validate_paths(ngx_http_request_t *r, ngx_str_t *src,
+    ngx_str_t *dst, ngx_uint_t slash, ngx_table_elt_t *dest)
+{
+    size_t  len;
+
+    len = src->len - 1;
+
+    if (len > 0 && src->data[len - 1] == '/') {
+        len--;
+    }
+
+    if (len == dst->len && ngx_strncmp(src->data, dst->data, len) == 0) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "both URI \"%V\" and \"Destination\" URI \"%V\" "
+                      "point to the same location",
+                      &r->uri, &dest->value);
+        return NGX_HTTP_FORBIDDEN;
+    }
+
+    if (slash
+        && ngx_strncmp(src->data, dst->data, ngx_min(len, dst->len)) == 0
+        && (len < dst->len
+            ? dst->data[len] == '/'
+            : src->data[dst->len] == '/'))
+    {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "\"%V\" could not be %Ved to collection \"%V\"",
+                      &r->uri, &r->method_name, &dest->value);
+        return NGX_HTTP_FORBIDDEN;
+    }
+
+    return NGX_OK;
 }
 
 
@@ -1069,35 +1159,40 @@ ngx_http_dav_error(ngx_log_t *log, ngx_err_t err, ngx_int_t not_found,
 
 
 static ngx_int_t
-ngx_http_dav_location(ngx_http_request_t *r, u_char *path)
+ngx_http_dav_location(ngx_http_request_t *r)
 {
-    u_char                    *location;
-    ngx_http_core_loc_conf_t  *clcf;
+    u_char     *p;
+    size_t      len;
+    uintptr_t   escape;
 
     r->headers_out.location = ngx_list_push(&r->headers_out.headers);
     if (r->headers_out.location == NULL) {
         return NGX_ERROR;
     }
 
-    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+    r->headers_out.location->hash = 1;
+    r->headers_out.location->next = NULL;
+    ngx_str_set(&r->headers_out.location->key, "Location");
 
-    if (!clcf->alias && clcf->root_lengths == NULL) {
-        location = path + clcf->root.len;
+    escape = 2 * ngx_escape_uri(NULL, r->uri.data, r->uri.len, NGX_ESCAPE_URI);
 
-    } else {
-        location = ngx_pnalloc(r->pool, r->uri.len);
-        if (location == NULL) {
+    if (escape) {
+        len = r->uri.len + escape;
+
+        p = ngx_pnalloc(r->pool, len);
+        if (p == NULL) {
             ngx_http_clear_location(r);
             return NGX_ERROR;
         }
 
-        ngx_memcpy(location, r->uri.data, r->uri.len);
-    }
+        r->headers_out.location->value.len = len;
+        r->headers_out.location->value.data = p;
 
-    r->headers_out.location->hash = 1;
-    ngx_str_set(&r->headers_out.location->key, "Location");
-    r->headers_out.location->value.len = r->uri.len;
-    r->headers_out.location->value.data = location;
+        ngx_escape_uri(p, r->uri.data, r->uri.len, NGX_ESCAPE_URI);
+
+    } else {
+        r->headers_out.location->value = r->uri;
+    }
 
     return NGX_OK;
 }

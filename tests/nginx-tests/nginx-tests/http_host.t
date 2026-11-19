@@ -2,6 +2,8 @@
 
 # (C) Maxim Dounin
 # (C) Valentin Bartenev
+# (C) Sergey Kandaurov
+# (C) Nginx, Inc.
 
 # Tests for host parsing in requests.
 
@@ -15,14 +17,14 @@ use Test::More;
 BEGIN { use FindBin; chdir($FindBin::Bin); }
 
 use lib 'lib';
-use Test::Nginx;
+use Test::Nginx qw/ :DEFAULT http_content /;
 
 ###############################################################################
 
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http rewrite/)->plan(35);
+my $t = Test::Nginx->new()->has(qw/http rewrite/)->plan(60);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -52,6 +54,32 @@ $t->run();
 
 ###############################################################################
 
+like(http_host_header('', 1), qr / 400 /,
+	'domain empty (host header)');
+like(http_absolute_path('', 1), qr / 400 /,
+	'domain empty (absolute request)');
+
+is(http_host_header('l'), 'l',
+	'domain single (host header)');
+is(http_absolute_path('l'), 'l',
+	'domain single (absolute request)');
+
+is(http_host_header('L'), 'l',
+	'domain single upper (host header)');
+is(http_absolute_path('L'), 'l',
+	'domain single upper (absolute request)');
+
+
+is(http_host_header('abcd-ef.g02.xyz:'), 'abcd-ef.g02.xyz',
+	'domain stray colon (host header)');
+is(http_absolute_path('abcd-ef.g02.xyz:'), 'abcd-ef.g02.xyz',
+	'domain stray colon (absolute request)');
+
+is(http_host_header('123.40.56.78:'), '123.40.56.78',
+	'ipv4 stray colon (host header)');
+is(http_absolute_path('123.49.0.78:'), '123.49.0.78',
+	'ipv4 stray colon (absolute request)');
+
 
 is(http_host_header('www.abcd-ef.g02.xyz'), 'www.abcd-ef.g02.xyz',
 	'domain w/o port (host header)');
@@ -66,7 +94,6 @@ is(http_absolute_path('www.abcd-ef.g02.xyz:10'), 'www.abcd-ef.g02.xyz',
 
 is(http_host_header('www.abcd-ef.g02.xyz.'), 'www.abcd-ef.g02.xyz',
 	'domain w/ ending dot w/o port (host header)');
-
 is(http_host_header('abcd-ef.g02.xyz.:88'), 'abcd-ef.g02.xyz',
 	'domain w/ ending dot w/port (host header)');
 
@@ -74,6 +101,22 @@ is(http_absolute_path('www.abcd-ef.g02.xyz.'), 'www.abcd-ef.g02.xyz',
 	'domain w/ ending dot w/o port (absolute request)');
 is(http_absolute_path('abcd-ef.g02.xyz.:2'), 'abcd-ef.g02.xyz',
 	'domain w/ ending dot w/port (absolute request)');
+
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.4');
+
+like(http_host_header('example.com.:1.2', 1), qr/ 400 /,
+	'domain w/ ending dot w/port dot (host header)');
+
+}
+
+like(http_host_header('.', 1), qr/ 400 /,
+	'empty domain w/ ending dot (host header)');
+
+like(http_absolute_path('example.com.:1.2', 1), qr/ 400 /,
+	'domain w/ ending dot w/port dot (absolute request)');
+like(http_absolute_path('.', 1), qr/ 400 /,
+	'empty domain w/ ending dot (absolute request)');
 
 
 is(http_absolute_path('AbC-d93.0.34ZhGt-s.nk.Ru'), 'abc-d93.0.34zhgt-s.nk.ru',
@@ -87,10 +130,31 @@ is(http_host_header('123.40.56.78'), '123.40.56.78',
 is(http_host_header('123.49.0.78:987'), '123.49.0.78',
 	'ipv4 w/port (host header)');
 
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.4');
+
+like(http_host_header('123.49.0.78:98777', 1), qr/ 400 /,
+	'ipv4 w/port long (host header)');
+like(http_host_header('123.40.56.78:9000:80', 1), qr/ 400 /,
+	'ipv4 w/port double (host header)');
+
+}
+
 is(http_absolute_path('123.49.0.78'), '123.49.0.78',
 	'ipv4 w/o port (absolute request)');
 is(http_absolute_path('123.40.56.78:123'), '123.40.56.78',
 	'ipv4 w/port (absolute request)');
+
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.3');
+
+like(http_absolute_path('123.40.56.78:123456', 1), qr/ 400 /,
+	'ipv4 w/port long (absolute request)');
+
+}
+
+like(http_absolute_path('123.40.56.78:9000:80', 1), qr/ 400 /,
+	'ipv4 w/port double (absolute request)');
 
 is(http_host_header('[abcd::ef98:0:7654:321]'), '[abcd::ef98:0:7654:321]',
 	'ipv6 literal w/o port (host header)');
@@ -128,17 +192,47 @@ like(http_host_header('[abcd::e\f98:0/:7654:321]', 1), qr/ 400 /,
 like(http_absolute_path('[abcd\::ef98:0:7654:321/]:12', 1), qr/ 400 /,
 	'ipv6 literal w/ path separators (absolute request)');
 
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.4');
+
+like(http_host_header('[abcd::ef98:0:7654:321].', 1), qr/ 400 /,
+	'ipv6 literal w/ ending dot w/o port(host header)');
+like(http_host_header('[abcd::ef98:0:7654:321].:98', 1), qr/ 400 /,
+	'ipv6 literal w/ ending dot w/port (host header)');
+
+}
+
+like(http_absolute_path('[abcd::ef98:0:7654:321].', 1), qr/ 400 /,
+	'ipv6 literal w/ ending dot w/o port(absolute request)');
+like(http_absolute_path('[abcd::ef98:0:7654:321].:98', 1), qr/ 400 /,
+	'ipv6 literal w/ ending dot w/port (absolute request)');
+
 like(http_host_header('[abcd::ef98:0:7654:321]..:98', 1), qr/ 400 /,
 	'ipv6 literal w/ double dot (host header)');
 like(http_absolute_path('[ab..cd::ef98:0:7654:321]', 1), qr/ 400 /,
 	'ipv6 literal w/ double dot (absolute request)');
 
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.4');
 
-like(http_host_header('[abcd::ef98:0:7654:321]..:98', 1), qr/ 400 /,
-	'ipv6 literal w/ double dot (host header)');
-like(http_absolute_path('[ab..cd::ef98:0:7654:321]', 1), qr/ 400 /,
-	'ipv6 literal w/ double dot (absolute request)');
+like(http_host_header('extra[abcd::ef98:0:7654:321]:98', 1), qr/ 400 /,
+	'ipv6 literal w/ leading alnum (host header)');
 
+}
+
+like(http_absolute_path('extra[abcd::ef98:0:7654:321]', 1), qr/ 400 /,
+	'ipv6 literal w/ leading alnum (absolute request)');
+
+TODO: {
+local $TODO = 'not yet' unless $t->has_version('1.29.4');
+
+like(http_host_header('[abcd::ef98:0:7654:321', 1), qr/ 400 /,
+	'ipv6 literal missing bracket (host header)');
+
+}
+
+like(http_absolute_path('[abcd::ef98:0:7654:321', 1), qr/ 400 /,
+	'ipv6 literal missing bracket (absolute request)');
 
 # As per RFC 3986,
 # http://tools.ietf.org/html/rfc3986#section-3.2.2
@@ -167,8 +261,8 @@ is(http_absolute_path(
 	. '0123456789:]',
 	'IPvFuture all symbols (absolute request)');
 
-is(http_host_header('123.40.56.78:9000:80'), '123.40.56.78',
-	'double port hack');
+like(http_host_header("localhost\nHost: again", 1), qr/ 400 /, 'host repeat');
+like(http_host_header("localhost\x02", 1), qr/ 400 /, 'control');
 
 ###############################################################################
 
@@ -179,7 +273,7 @@ GET / HTTP/1.0
 Host: $host
 
 EOF
-	return ($all ? $r : Test::Nginx::http_content($r));
+	return ($all ? $r : http_content($r));
 }
 
 sub http_absolute_path {
@@ -189,5 +283,7 @@ GET http://$host/ HTTP/1.0
 Host: localhost
 
 EOF
-	return ($all ? $r : Test::Nginx::http_content($r));
+	return ($all ? $r : http_content($r));
 }
+
+###############################################################################

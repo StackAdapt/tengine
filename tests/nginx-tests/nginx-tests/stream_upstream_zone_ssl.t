@@ -36,6 +36,8 @@ events {
 }
 
 stream {
+    %%TEST_GLOBALS_STREAM%%
+
     proxy_ssl on;
     proxy_ssl_session_reuse on;
 
@@ -80,13 +82,26 @@ stream {
         ssl_certificate localhost.crt;
         ssl_session_cache builtin;
     }
+
+    server {
+        listen      127.0.0.1:8085;
+        proxy_pass  127.0.0.1:8086;
+    }
+
+    server {
+        listen      127.0.0.1:8086 ssl;
+        return      $ssl_protocol;
+
+        ssl_certificate_key localhost.key;
+        ssl_certificate localhost.crt;
+    }
 }
 
 EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]
@@ -110,13 +125,33 @@ is(stream('127.0.0.1:' . port(8080))->read(), '.', 'ssl');
 is(stream('127.0.0.1:' . port(8080))->read(), '.', 'ssl 2');
 
 is(stream('127.0.0.1:' . port(8081))->read(), '.', 'ssl session new');
+
+TODO: {
+local $TODO = 'no TLSv1.3 sessions in LibreSSL'
+	if $t->has_module('LibreSSL') and test_tls13();
+
 is(stream('127.0.0.1:' . port(8081))->read(), 'r', 'ssl session reused');
 is(stream('127.0.0.1:' . port(8081))->read(), 'r', 'ssl session reused 2');
+
+}
 
 is(stream('127.0.0.1:' . port(8082))->read(), '.', 'backup ssl');
 is(stream('127.0.0.1:' . port(8082))->read(), '.', 'backup ssl 2');
 
 is(stream('127.0.0.1:' . port(8083))->read(), '.', 'backup ssl session new');
+
+TODO: {
+local $TODO = 'no TLSv1.3 sessions in LibreSSL'
+	if $t->has_module('LibreSSL') and test_tls13();
+
 is(stream('127.0.0.1:' . port(8083))->read(), 'r', 'backup ssl session reused');
+
+}
+
+###############################################################################
+
+sub test_tls13 {
+	stream('127.0.0.1:' . port(8085))->read() =~ /TLSv1.3/;
+}
 
 ###############################################################################

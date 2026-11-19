@@ -1,3 +1,1573 @@
+Changes with nginx 1.31.9                                        18 Nov 2026
+
+    *) Security: a buffer overflow might occur in a worker process when
+       using the "try_files" and "alias" directives in certain
+       configurations (CVE-2026-125283). Thanks to Marc Luchian and
+       Liviu-Alexandru Bud.
+
+    *) Security: a flow control window overflow in HTTP/2 might allow
+       an attacker to cause a segmentation fault in a worker process,
+       or might have potential other impact (CVE-2026-123007). Thanks
+       to Xint.io.
+
+    *) Security: use-after-free might occur in a worker process when
+       using HTTP/2 if worker_connections were not enough
+       (CVE-2026-123633). Thanks to Albert of Vexera AI.
+
+    *) Security: use-after-free might occur in a worker process when
+       using HTTP/3 if worker_connections were not enough
+       (CVE-2026-121810). Thanks to Xint.io.
+
+    *) Security: use-after-free condition might occur if the "resolver"
+       directive was used and the same name was simultaneously resolved
+       in subrequests, allowing an attacker who is able to trigger name
+       resolution to cause segmentation fault in a worker process, or
+       might have potential other impact (CVE-2026-123634). Thanks to
+       Xint.io.
+
+    *) Security: use-after-free might occur in a worker process in the
+       mail proxy server (CVE-2026-113425). Thanks to Xint.io and Maxim
+       Dounin.
+
+    *) Security: in the stream module, an attacker who is able to
+       complete the SSL handshake synchronously might cause client SSL
+       certificates to be verified using the configuration of the
+       default server rather than the virtual server selected by SNI
+       (CVE-2026-120967). Thanks to CERT.PL.
+
+    *) Security: a segmentation fault might occur in a worker process
+       when using PROXY protocol version 2 with dynamic SSL certificate
+       loading (CVE-2026-120993). Thanks to ruokeqx.
+
+    *) Security: the ngx_stream_ssl_preread_module might interpret
+       malformed ClientHello messages differently than other TLS
+       implementations, which might result in bypassing security
+       restrictions (CVE-2026-123640). Thanks to Vivek Parikh of
+       BreachX Zero Day Labs.
+
+    *) Security: worker processes might get caught in an endless loop
+       while reading the request body over SSL (CVE-2026-118899).
+       Thanks to Maxim Dounin.
+
+    *) Change: now header lines without a colon are rejected. Thanks to
+       Maxim Dounin.
+
+    *) Change: now a request is rejected if the chunked request body
+       contains too much framing overhead. Thanks to jskoetsier.
+
+    *) Bugfix: a buffer overflow might occur in a worker process when
+       using a GeoIP database in the MMDB format containing invalid
+       coordinates. Thanks to Y.Horie.
+
+    *) Bugfix: a request might hang if it was proxied while the request
+       body was being discarded. Thanks to Maxim Dounin.
+
+    *) Bugfix: some values of the QPACK static table were decoded
+       incorrectly when using HTTP/3. Thanks to Nexory.
+
+    *) Bugfix: when using HTTP/2, response trailers might delay data of
+       higher priority streams.
+
+    *) Bugfix: the $cookie_... variables and the ngx_http_userid_module
+       handled the "Cookie" request header line incorrectly if it
+       contained a cookie without a name.
+
+    *) Bugfix: non-cacheable variables in the "index" directive might
+       be evaluated incorrectly. Thanks to Maxim Dounin.
+
+    *) Bugfix: OCSP responses for client certificates with uncommon
+       serial numbers might be cached incorrectly when using the
+       "ssl_ocsp_cache" directive. Thanks to Gyejin Lee of QED Audit.
+
+    *) Bugfix: the control API did not respond to requests with a too
+       long request line. Thanks to Daewoo Choi.
+
+
+Changes with nginx 1.31.8                                        21 Oct 2026
+
+    *) Change: Change in internal API: now the JSON parser reports
+       strings with escape sequences as separate events, and the
+       ngx_json_unescape_string() function decodes a string into a
+       separate buffer.
+
+    *) Change: now the path specified in the "working_directory"
+       directive is relative to nginx prefix directory, but not to the
+       current directory.
+
+    *) Bugfix: worker processes exited on start or during
+       reconfiguration if an invalid directory was specified in the
+       "working_directory" directive.
+
+    *) Bugfix: worker processes might be terminated abnormally on a
+       SIGBUS signal when using HTTP/3 on platforms with strict
+       alignment requirements. Thanks to Daewoo Choi.
+
+    *) Bugfix: "recv() failed (5: Input/output error)" alerts might
+       appear in logs when closing SSL connections if kernel TLS was
+       used with OpenSSL 3.2.0 or newer.
+
+    *) Bugfix: nginx could not be built on Solaris if the
+       --with-control-api option was used.
+
+
+Changes with nginx 1.31.7                                        14 Oct 2026
+
+    *) Security: a buffer overflow might occur in a worker process when
+       using the "alias" directive if the request URI was changed by
+       the "rewrite" directive and was then mapped to a file path
+       (CVE-2026-15176).
+
+    *) Security: a buffer overflow might occur in a worker process
+       while evaluating string expressions with variables, which
+       affected the document root calculation and request logging in
+       the http and stream modules (CVE-2026-93479). Thanks to Matt
+       Suiche of Tolmo Inc.
+
+    *) Security: when using HTTP/3 a part of an unknown frame might be
+       treated as the request body, which might result in bypassing the
+       "client_max_body_size" limit or injecting data in the proxied
+       request (CVE-2026-95101). Thanks to Hansol Lee of GOTROOT.
+
+    *) Security: when using TLS session ticket key rotation, one of the
+       keys was left uninitialized, which might allow to forge a
+       session (CVE-2026-97629). Thanks to PhiNode Labs.
+
+    *) Security: when using asynchronous file I/O (AIO), use-after-free
+       might occur in certain configurations if the SSI page has
+       "include virtual" commands (CVE-2026-97205). Thanks to
+       cyberlancer.
+
+    *) Feature: the ngx_http_geoip_module and ngx_stream_geoip_module
+       now support databases in the MaxMind DB (MMDB) format.
+
+    *) Feature: now backend SSL certificates can be verified by IP
+       address. Thanks to Maxim Dounin.
+
+    *) Feature: now QUIC supports reconfiguration and binary upgrade
+       when using the "quic_bpf" directive.
+
+    *) Change: the ngx_http_v2_module now uses the RFC 9218
+       prioritization scheme, and RFC 7540 priority signals are
+       ignored.
+
+    *) Bugfix: a segmentation fault might occur in a worker process or
+       "request count is zero" alerts might appear in logs if the
+       "X-Accel-Redirect" header line was cached and the cached
+       response was then served to a client. Thanks to Jiří Setnička
+       and Maxim Dounin.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if
+       the ngx_http_dav_module was used to handle COPY and MOVE methods
+       in a location with the "alias" directive. Thanks to Maxim
+       Dounin.
+
+    *) Bugfix: QUIC connections might be closed with the "quic flood
+       detected" message in logs if the "http3_stream_buffer_size"
+       directive was set to a small value; the bug had appeared in
+       1.27.5.
+
+    *) Bugfix: closing an SSL connection without close_notify was
+       treated as a clean shutdown, including the case when the
+       connection was reset; now "SSL_read() failed" errors appear in
+       logs in this case. Thanks to Maxim Dounin.
+
+    *) Bugfix: "[crit] SSL_write() failed" messages might appear in
+       logs when an error occurred while reading from an SSL
+       connection.
+
+
+Changes with nginx 1.31.6                                        15 Sep 2026
+
+    *) Security: a heap memory buffer overflow might occur in a worker
+       process under certain configurations when using HTTP/3 with
+       OpenSSL 3.5.0 and earlier (CVE-2026-90439). Thanks to Banny
+       Liao.
+
+    *) Change: now the QUIC transport parameters extension received in
+       an SSL connection is always ignored.
+
+    *) Bugfix: binary upgrade refused to work if the control API socket
+       was specified and the new nginx executable was built with the
+       ngx_http_perl_module.
+
+    *) Bugfix: an error while evaluating a predicate in a predicate
+       location was ignored and the predicate was treated as false.
+
+    *) Bugfix: an error during a nested location lookup might be
+       ignored if locations given by regular expressions or predicates
+       were configured at the current level.
+
+    *) Bugfix: a segmentation fault might occur while reading
+       configuration if the "geo" directive with the "ranges" parameter
+       was used and the corresponding binary base file was corrupted.
+
+
+Changes with nginx 1.31.5                                        02 Sep 2026
+
+    *) Feature: control API.
+
+    *) Feature: predicate locations.
+
+    *) Feature: the ngx_http_json_module.
+
+    *) Feature: the "client_body_early_read" directive.
+
+    *) Bugfix: use-after-free might occur in a worker process if proxying
+       with buffering was used and an error occurred while sending the
+       response to an HTTP/2 client.
+
+    *) Bugfix: a worker process might not exit or "accept4() failed (9: Bad
+       file descriptor)" alerts might appear in logs if the worker process
+       ran out of file descriptors before graceful shutdown.
+
+    *) Bugfix: requests to FastCGI and uwsgi backends were malformed if a
+       parameter name was too long.
+
+    *) Bugfixes in HTTP/3, ngx_http_slice_module, and
+       ngx_http_memcached_module.
+
+
+Changes with nginx 1.31.4                                        19 Aug 2026
+
+    *) Feature: the "proxy_protocol" directive in the stream and mail modules
+       now supports the PROXY protocol version 2.
+
+    *) Change: now HTTP/2 and gRPC requests to backends are always sent with
+       the ":authority" pseudo-header, and HTTP/1.1 requests - with the
+       "Host" header.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if the
+       "select" method was used.
+
+    *) Bugfix: incomplete gRPC responses with a non-zero "Content-Length"
+       header line are now treated as malformed.
+
+    *) Bugfix: in binary compatibility with third-party modules using script
+       codes; the bug had appeared in 1.31.3.
+
+    *) Bugfix: in the ngx_http_perl_module.
+       Thanks to David Carlier.
+
+    *) Bugfixes in HTTP/2, HTTP/3, ngx_http_image_filter_module, and
+       ngx_http_grpc_module.
+
+
+Changes with nginx 1.31.3                                        15 Jul 2026
+
+    *) Security: heap buffer overflow might occur in a worker process when
+       using the map directive with regex matching if the map variable was
+       included in a string expression after a capture affected by this map;
+       a similar issue might happen when using a non-cacheable variable in a
+       string expression (CVE-2026-42533).
+       Thanks to Mufeed VH of Winfunc Research and Maxim Dounin.
+
+    *) Security: uninitialized memory access might occur when using unnamed
+       regex captures with the "slice" directive or background cache update,
+       which could result in worker process memory disclosure or worker
+       process termination (CVE-2026-60005).
+
+    *) Security: use-after-free might occur when processing a specially
+       crafted proxied backend response with the ngx_http_ssi_filter_module
+       (CVE-2026-56434).
+       Thanks to P4P3R-HAK.
+
+    *) Change: the size of headers and trailers in HTTP/2 responses in the
+       ngx_http_proxy_v2_module and ngx_http_grpc_module is now limited with
+       "proxy_buffer_size" and "grpc_buffer_size" directives.
+
+    *) Change: loading of external entities is now disabled in the
+       ngx_http_xslt_filter_module.
+       Thanks to Maxim Dounin.
+
+    *) Feature: the "xml_external_entities" directive in the
+       ngx_http_xslt_filter_module.
+       Thanks to Maxim Dounin.
+
+    *) Feature: the "proxy_socket_sndbuf", "proxy_socket_rcvbuf",
+       "fastcgi_socket_sndbuf", "fastcgi_socket_rcvbuf",
+       "grpc_socket_sndbuf", "grpc_socket_rcvbuf", "scgi_socket_sndbuf",
+       "scgi_socket_rcvbuf", "uwsgi_socket_sndbuf", "uwsgi_socket_rcvbuf",
+       "tunnel_socket_sndbuf", and "tunnel_socket_rcvbuf" directives.
+
+    *) Feature: cache line size detection for loongarch64.
+       Thanks to Miao Wang.
+
+    *) Bugfix: now nginx rejects HTTP/2 requests with out-of-order
+       pseudo-headers.
+
+    *) Bugfix: in flow control in the ngx_http_v2_module.
+
+    *) Bugfix: "[error] upstream sent frame for unknown stream" and "[crit]
+       cache file ... contains invalid header" messages might appear in logs
+       when sending a cached HTTP/2 response in the ngx_http_proxy_v2_module
+       if the "proxy_cache_revalidate" directive was used.
+
+    *) Bugfix: nginx might send the "Upgrade" header line in HTTP/2 and
+       HTTP/3 responses.
+
+    *) Bugfix: in the ngx_http_perl_module.
+       Thanks to Maxim Dounin.
+
+    *) Bugfix: IPv6 fragmentation might not be disabled when using QUIC on
+       some operating systems.
+
+    *) Bugfix: in the ngx_http_auth_basic_module on Solaris.
+
+    *) Bugfixes and improvements in the ngx_http_tunnel_module.
+
+
+Changes with nginx 1.31.2                                        17 Jun 2026
+
+    *) Security: use-after-free might occur when using HTTP/3 and processing
+       a specially crafted QUIC session, allowing an attacker to cause
+       worker process memory corruption or segmentation fault in a worker
+       process (CVE-2026-42530).
+       Thanks to Trung Nguyen of CyStack.
+
+    *) Security: a heap memory buffer overflow might occur in a worker
+       process when using a configuration with "ignore_invalid_headers off;"
+       and "large_client_header_buffers" with large configured values when
+       proxying a specially crafted request to HTTP/2 or gRPC backend,
+       allowing an attacker to cause worker process memory corruption or
+       segmentation fault in a worker process (CVE-2026-42055).
+       Thanks to Mufeed VH of Winfunc Research.
+
+    *) Security: a heap memory buffer overread might occur in a worker
+       process while handling a specially sent response with decoding from
+       UTF-8 via the "charset_map" directive, allowing an attacker to cause
+       a limited disclosure of worker proccess memory or segmentation fault
+       in a worker process (CVE-2026-48142).
+       Thanks to Han Yan of Xiaomi and p4p3r of CYBERONE.
+
+    *) Change: now the $request_id variable uses SipHash-2-4.
+
+    *) Feature: the $ssl_sigalgs variable.
+
+    *) Bugfix: a variable defined by the "split_clients" directive might be
+       empty if all percentages were specified explicitly and summed up to
+       100%.
+
+    *) Bugfix: constant time "secure_link" hash comparison.
+       Thanks to kodareef5.
+
+
+Changes with nginx 1.31.1                                        22 May 2026
+
+    *) Security: a heap memory buffer overflow might occur in a worker
+       process when using a configuration with overlapping captures in
+       ngx_http_rewrite_module, potentially resulting in arbitrary code
+       execution (CVE-2026-9256).
+       Thanks to Mufeed VH of Winfunc Research.
+
+
+Changes with nginx 1.31.0                                        13 May 2026
+
+    *) Security: when using the "proxy_set_body" directive, an attacker
+       might inject data in the proxied request to an HTTP/2 backend
+       (CVE-2026-42926).
+       Thanks to Mufeed VH of Winfunc Research.
+
+    *) Security: a heap memory buffer overflow might occur in a worker
+       process while handling a specially crafted request by
+       ngx_http_rewrite_module, potentially resulting in arbitrary code
+       execution (CVE-2026-42945).
+       Thanks to Leo Lin.
+
+    *) Security: a heap memory buffer overread might occur in a worker
+       process while handling a specially crafted response by
+       ngx_http_scgi_module or ngx_http_uwsgi_module, allowing an attacker
+       to cause a disclosure of worker process memory or segmentation fault
+       in a worker process (CVE-2026-42946).
+       Thanks to Leo Lin.
+
+    *) Security: a heap memory buffer overread might occur in a worker
+       process while handling a specially sent response with decoding from
+       UTF-8 via the "charset_map" directive, allowing an attacker to cause
+       a limited disclosure of worker proccess memory or segmentation fault
+       in a worker process (CVE-2026-42934).
+       Thanks to David Carlier.
+
+    *) Security: when using HTTP/3, processing of connection migration might
+       cause new QUIC streams to receive a new client address before
+       validation, allowing an attacker to cause address spoofing
+       (CVE-2026-40460).
+       Thanks to Rodrigo Laneth.
+
+    *) Security: use-after-free might occur during DNS server response
+       processing if the "ssl_ocsp" directive was used, allowing an attacker
+       to cause worker process memory corruption or segmentation fault in a
+       worker process (CVE-2026-40701).
+       Thanks to Leo Lin.
+
+    *) Change: now nginx rejects HTTP/2 and HTTP/3 requests with the
+       "Connection", "Proxy-Connection", "Keep-Alive", "Transfer-Encoding",
+       "Upgrade" header lines, and "TE" with any value other than
+       "trailers".
+
+    *) Change: the ngx_http_dav_module now rejects a COPY or MOVE requests
+       when the source and destination resources are the same or have a
+       parent-child collection relationship.
+
+    *) Change: the logging level of the "invalid alert" and "record layer
+       failure" SSL errors, and of the "SSL alert number N" for any alert
+       numbers has been lowered from "crit" to "info".
+
+    *) Change: now the "sticky" module can be disabled with the
+       --without-http_upstream_sticky_module configure option; the
+       --without-http_upstream_sticky configure option is deprecated.
+
+    *) Feature: the ngx_http_tunnel_module; support for authenticating to
+       proxies in the "auth_basic", "satisfy", and "auth_delay" directives.
+
+    *) Feature: the "least_time" directive inside the "upstream" block.
+
+    *) Feature: the "proxy_ssl_alpn" directive in the stream module.
+
+    *) Bugfix: connections with HTTP/2 backends might not be cached when
+       using the "proxy_set_body" or "proxy_pass_request_body" directives.
+
+    *) Bugfix: proxied HTTP/0.9, SCGI, or uWSGI responses might be
+       transferred incorrectly if the first line was not fully read.
+
+
+Changes with nginx 1.29.8                                        07 Apr 2026
+
+    *) Feature: the "max_headers" directive.
+       Thanks to Maxim Dounin.
+
+    *) Feature: OpenSSL 4.0 compatibility.
+
+    *) Feature: now the "include" directive inside the "geo" block supports
+       wildcards.
+
+    *) Bugfix: in processing of HTTP 103 (Early Hints) responses from a
+       proxied backend.
+
+    *) Bugfix: the $request_port and $is_request_port variables were not
+       available in subrequests.
+
+
+Changes with nginx 1.29.7                                        24 Mar 2026
+
+    *) Security: a buffer overflow might occur while handling a COPY or MOVE
+       request in a location with "alias", allowing an attacker to modify
+       the source or destination path outside of the document root
+       (CVE-2026-27654).
+       Thanks to Calif.io in collaboration with Claude and Anthropic
+       Research.
+
+    *) Security: processing of a specially crafted mp4 file by the
+       ngx_http_mp4_module on 32-bit platforms might cause a worker process
+       crash, or might have potential other impact (CVE-2026-27784).
+       Thanks to Prabhav Srinath (sprabhav7).
+
+    *) Security: processing of a specially crafted mp4 file by the
+       ngx_http_mp4_module might cause a worker process crash, or might have
+       potential other impact (CVE-2026-32647).
+       Thanks to Xint Code and Pavel Kohout (Aisle Research).
+
+    *) Security: a segmentation fault might occur in a worker process if the
+       CRAM-MD5 or APOP authentication methods were used and authentication
+       retry was enabled (CVE-2026-27651).
+       Thanks to Arkadi Vainbrand.
+
+    *) Security: an attacker might use PTR DNS records to inject data in
+       auth_http requests, as well as in the XCLIENT command in the backend
+       SMTP connection (CVE-2026-28753).
+       Thanks to Asim Viladi Oglu Manizada, Colin Warren, Xiao Liu (Yunnan
+       University), Yuan Tan (UC Riverside), and Bird Liu (Lanzhou
+       University).
+
+    *) Security: SSL handshake might succeed despite OCSP rejecting a client
+       certificate in the stream module (CVE-2026-28755).
+       Thanks to Mufeed VH of Winfunc Research.
+
+    *) Feature: the "multipath" parameter of the "listen" directive.
+
+    *) Feature: the "local" parameter of the "keepalive" directive in the
+       "upstream" block.
+
+    *) Change: now the "keepalive" directive in the "upstream" block is
+       enabled by default.
+
+    *) Change: now ngx_http_proxy_module supports keepalive by default; the
+       default value for "proxy_http_version" is "1.1"; the "Connection"
+       proxy header is not sent by default anymore.
+
+    *) Bugfix: an invalid HTTP/2 request might be sent after switching to
+       the next upstream if buffered body was used in the
+       ngx_http_grpc_module.
+
+
+Changes with nginx 1.29.6                                        10 Mar 2026
+
+    *) Feature: session affinity support; the "sticky" directive in the
+       "upstream" block of the "http" module; the "server" directive
+       supports the "route" and "drain" parameters.
+
+    *) Change: now nginx limits the size and rate of QUIC stateless reset
+       packets.
+
+    *) Bugfix: receiving a QUIC packet by a wrong worker process could cause
+       the connection to terminate.
+
+    *) Bugfix: "[crit] cache file ... contains invalid header" messages
+       might appear in logs when sending a cached HTTP/2 response.
+
+    *) Bugfix: proxying to scgi backends might not work when using chunked
+       transfer encoding and the "scgi_request_buffering" directive.
+       Thanks to Mufeed VH.
+
+    *) Bugfix: in the ngx_http_mp4_module.
+       Thanks to Andrew Lacambra.
+
+    *) Bugfix: nginx treated a comma as separator in the "Cookie" request
+       header line when evaluating "$cookie_..." variables.
+
+    *) Bugfix: in IMAP command literal argument parsing.
+
+
+Changes with nginx 1.29.5                                        04 Feb 2026
+
+    *) Security: an attacker might inject plain text data in the response
+       from an SSL backend (CVE-2026-1642).
+
+    *) Bugfix: use-after-free might occur after switching to the next gRPC
+       or HTTP/2 backend.
+
+    *) Bugfix: an invalid HTTP/2 request might be sent after switching to
+       the next upstream.
+
+    *) Bugfix: a response with multiple ranges might be larger than the
+       source response.
+
+    *) Bugfix: fixed setting HTTP_HOST when proxying to FastCGI, SCGI, and
+       uwsgi backends.
+
+    *) Bugfix: fixed warning when compiling with MSVC 2022 x86.
+
+    *) Change: the logging level of the "ech_required" SSL error has been
+       lowered from "crit" to "info".
+
+
+Changes with nginx 1.29.4                                        09 Dec 2025
+
+    *) Feature: the ngx_http_proxy_module supports HTTP/2.
+
+    *) Feature: Encrypted ClientHello TLS extension support when using
+       OpenSSL ECH feature branch; the "ssl_ech_file" directive.
+       Thanks to Stephen Farrell.
+
+    *) Change: validation of host and port in the request line, "Host"
+       header field, and ":authority" pseudo-header field has been changed
+       to follow RFC 3986.
+
+    *) Change: now a single LF used as a line terminator in a chunked
+       request or response body is considered an error.
+
+    *) Bugfix: when using HTTP/3 with OpenSSL 3.5.1 or newer a segmentation
+       fault might occur in a worker process; the bug had appeared in
+       1.29.1.
+       Thanks to Jan Svojanovsky.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if the
+       "try_files" directive and "proxy_pass" with a URI were used.
+
+
+Changes with nginx 1.29.3                                        28 Oct 2025
+
+    *) Feature: the "add_header_inherit" and "add_trailer_inherit"
+       directives.
+
+    *) Feature: the $request_port and $is_request_port variables.
+
+    *) Feature: the $ssl_sigalg and $ssl_client_sigalg variables.
+
+    *) Feature: the "volatile" parameter of the "geo" directive.
+
+    *) Feature: now certificate compression is available with BoringSSL.
+
+    *) Bugfix: now certificate compression is disabled with OCSP stapling.
+
+
+Changes with nginx 1.29.2                                        07 Oct 2025
+
+    *) Feature: now nginx can be built with AWS-LC.
+       Thanks Samuel Chiang.
+
+    *) Bugfix: now the "ssl_protocols" directive works in a virtual server
+       different from the default server when using OpenSSL 1.1.1 or newer.
+
+    *) Bugfix: SSL handshake always failed when using TLSv1.3 with OpenSSL
+       and client certificates and resuming a session with a different SNI
+       value; the bug had appeared in 1.27.4.
+
+    *) Bugfix: the "ignoring stale global SSL error" alerts might appear in
+       logs when using QUIC and the "ssl_reject_handshake" directive; the
+       bug had appeared in 1.29.0.
+       Thanks to Vladimir Homutov.
+
+    *) Bugfix: in delta-seconds processing in the "Cache-Control" backend
+       response header line.
+
+    *) Bugfix: an XCLIENT command didn't use the xtext encoding.
+       Thanks to Igor Morgenstern of Aisle Research.
+
+    *) Bugfix: in SSL certificate caching during reconfiguration.
+
+
+Changes with nginx 1.29.1                                        13 Aug 2025
+
+    *) Security: processing of a specially crafted login/password when using
+       the "none" authentication method in the ngx_mail_smtp_module might
+       cause worker process memory disclosure to the authentication server
+       (CVE-2025-53859).
+
+    *) Change: now TLSv1.3 certificate compression is disabled by default.
+
+    *) Feature: the "ssl_certificate_compression" directive.
+
+    *) Feature: support for 0-RTT in QUIC when using OpenSSL 3.5.1 or newer.
+
+    *) Bugfix: the 103 response might be buffered when using HTTP/2 and the
+       "early_hints" directive.
+
+    *) Bugfix: in handling "Host" and ":authority" header lines with equal
+       values when using HTTP/2; the bug had appeared in 1.17.9.
+
+    *) Bugfix: in handling "Host" header lines with a port when using
+       HTTP/3.
+
+    *) Bugfix: nginx could not be built on NetBSD 10.0.
+
+    *) Bugfix: in the "none" parameter of the "smtp_auth" directive.
+
+
+Changes with nginx 1.29.0                                        24 Jun 2025
+
+    *) Feature: support for response code 103 from proxy and gRPC backends;
+       the "early_hints" directive.
+
+    *) Feature: loading of secret keys from hardware tokens with OpenSSL
+       provider.
+
+    *) Feature: support for the "so_keepalive" parameter of the "listen"
+       directive on macOS.
+
+    *) Change: the logging level of SSL errors in a QUIC handshake has been
+       changed from "error" to "crit" for critical errors, and to "info" for
+       the rest; the logging level of unsupported QUIC transport parameters
+       has been lowered from "info" to "debug".
+
+    *) Change: the native nginx/Windows binary release is now built using
+       Windows SDK 10.
+
+    *) Bugfix: nginx could not be built by gcc 15 if ngx_http_v2_module or
+       ngx_http_v3_module modules were used.
+
+    *) Bugfix: nginx might not be built by gcc 14 or newer with -O3 -flto
+       optimization if ngx_http_v3_module was used.
+
+    *) Bugfixes and improvements in HTTP/3.
+
+
+Changes with nginx 1.27.5                                        16 Apr 2025
+
+    *) Feature: CUBIC congestion control in QUIC connections.
+
+    *) Change: the maximum size limit for SSL sessions cached in shared
+       memory has been raised to 8192.
+
+    *) Bugfix: in the "grpc_ssl_password_file", "proxy_ssl_password_file",
+       and "uwsgi_ssl_password_file" directives when loading SSL
+       certificates and encrypted keys from variables; the bug had appeared
+       in 1.23.1.
+
+    *) Bugfix: in the $ssl_curve and $ssl_curves variables when using
+       pluggable curves in OpenSSL.
+
+    *) Bugfix: nginx could not be built with musl libc.
+       Thanks to Piotr Sikora.
+
+    *) Performance improvements and bugfixes in HTTP/3.
+
+
+Changes with nginx 1.27.4                                        05 Feb 2025
+
+    *) Security: insufficient check in virtual servers handling with TLSv1.3
+       SNI allowed to reuse SSL sessions in a different virtual server, to
+       bypass client SSL certificates verification (CVE-2025-23419).
+
+    *) Feature: the "ssl_object_cache_inheritable", "ssl_certificate_cache",
+       "proxy_ssl_certificate_cache", "grpc_ssl_certificate_cache", and
+       "uwsgi_ssl_certificate_cache" directives.
+
+    *) Feature: the "keepalive_min_timeout" directive.
+
+    *) Workaround: "gzip filter failed to use preallocated memory" alerts
+       appeared in logs when using zlib-ng.
+
+    *) Bugfix: nginx could not build libatomic library using the library
+       sources if the --with-libatomic=DIR option was used.
+
+    *) Bugfix: QUIC connection might not be established when using 0-RTT;
+       the bug had appeared in 1.27.1.
+
+    *) Bugfix: nginx now ignores QUIC version negotiation packets from
+       clients.
+
+    *) Bugfix: nginx could not be built on Solaris 10 and earlier with the
+       ngx_http_v3_module.
+
+    *) Bugfixes in HTTP/3.
+
+
+Changes with nginx 1.27.3                                        26 Nov 2024
+
+    *) Feature: the "server" directive in the "upstream" block supports the
+       "resolve" parameter.
+
+    *) Feature: the "resolver" and "resolver_timeout" directives in the
+       "upstream" block.
+
+    *) Feature: SmarterMail specific mode support for IMAP LOGIN with
+       untagged CAPABILITY response in the mail proxy module.
+
+    *) Change: now TLSv1 and TLSv1.1 protocols are disabled by default.
+
+    *) Change: an IPv6 address in square brackets and no port can be
+       specified in the "proxy_bind", "fastcgi_bind", "grpc_bind",
+       "memcached_bind", "scgi_bind", and "uwsgi_bind" directives, and as
+       client address in ngx_http_realip_module.
+
+    *) Bugfix: in the ngx_http_mp4_module.
+       Thanks to Nils Bars.
+
+    *) Bugfix: the "so_keepalive" parameter of the "listen" directive might
+       be handled incorrectly on DragonFly BSD.
+
+    *) Bugfix: in the "proxy_store" directive.
+
+
+Changes with nginx 1.27.2                                        02 Oct 2024
+
+    *) Feature: SSL certificates, secret keys, and CRLs are now cached on
+       start or during reconfiguration.
+
+    *) Feature: client certificate validation with OCSP in the stream
+       module.
+
+    *) Feature: OCSP stapling support in the stream module.
+
+    *) Feature: the "proxy_pass_trailers" directive in the
+       ngx_http_proxy_module.
+
+    *) Feature: the "ssl_client_certificate" directive now supports
+       certificates with auxiliary information.
+
+    *) Change: now the "ssl_client_certificate" directive is not required
+       for client SSL certificates verification.
+
+
+Changes with nginx 1.27.1                                        14 Aug 2024
+
+    *) Security: processing of a specially crafted mp4 file by the
+       ngx_http_mp4_module might cause a worker process crash
+       (CVE-2024-7347).
+       Thanks to Nils Bars.
+
+    *) Change: now the stream module handler is not mandatory.
+
+    *) Bugfix: new HTTP/2 connections might ignore graceful shutdown of old
+       worker processes.
+       Thanks to Kasei Wang.
+
+    *) Bugfixes in HTTP/3.
+
+
+Changes with nginx 1.27.0                                        29 May 2024
+
+    *) Security: when using HTTP/3, processing of a specially crafted QUIC
+       session might cause a worker process crash, worker process memory
+       disclosure on systems with MTU larger than 4096 bytes, or might have
+       potential other impact (CVE-2024-32760, CVE-2024-31079,
+       CVE-2024-35200, CVE-2024-34161).
+       Thanks to Nils Bars of CISPA.
+
+    *) Feature: variables support in the "proxy_limit_rate",
+       "fastcgi_limit_rate", "scgi_limit_rate", and "uwsgi_limit_rate"
+       directives.
+
+    *) Bugfix: reduced memory consumption for long-lived requests if "gzip",
+       "gunzip", "ssi", "sub_filter", or "grpc_pass" directives are used.
+
+    *) Bugfix: nginx could not be built by gcc 14 if the --with-libatomic
+       option was used.
+       Thanks to Edgar Bonet.
+
+    *) Bugfixes in HTTP/3.
+
+
+Changes with nginx 1.25.5                                        16 Apr 2024
+
+    *) Feature: virtual servers in the stream module.
+
+    *) Feature: the ngx_stream_pass_module.
+
+    *) Feature: the "deferred", "accept_filter", and "setfib" parameters of
+       the "listen" directive in the stream module.
+
+    *) Feature: cache line size detection for some architectures.
+       Thanks to Piotr Sikora.
+
+    *) Feature: support for Homebrew on Apple Silicon.
+       Thanks to Piotr Sikora.
+
+    *) Bugfix: Windows cross-compilation bugfixes and improvements.
+       Thanks to Piotr Sikora.
+
+    *) Bugfix: unexpected connection closure while using 0-RTT in QUIC.
+       Thanks to Vladimir Khomutov.
+
+
+Changes with nginx 1.25.4                                        14 Feb 2024
+
+    *) Security: when using HTTP/3 a segmentation fault might occur in a
+       worker process while processing a specially crafted QUIC session
+       (CVE-2024-24989, CVE-2024-24990).
+
+    *) Bugfix: connections with pending AIO operations might be closed
+       prematurely during graceful shutdown of old worker processes.
+
+    *) Bugfix: socket leak alerts no longer logged when fast shutdown was
+       requested after graceful shutdown of old worker processes.
+
+    *) Bugfix: a socket descriptor error, a socket leak, or a segmentation
+       fault in a worker process (for SSL proxying) might occur if AIO was
+       used in a subrequest.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if SSL
+       proxying was used along with the "image_filter" directive and errors
+       with code 415 were redirected with the "error_page" directive.
+
+    *) Bugfixes and improvements in HTTP/3.
+
+
+Changes with nginx 1.25.3                                        24 Oct 2023
+
+    *) Change: improved detection of misbehaving clients when using HTTP/2.
+
+    *) Feature: startup speedup when using a large number of locations.
+       Thanks to Yusuke Nojima.
+
+    *) Bugfix: a segmentation fault might occur in a worker process when
+       using HTTP/2 without SSL; the bug had appeared in 1.25.1.
+
+    *) Bugfix: the "Status" backend response header line with an empty
+       reason phrase was handled incorrectly.
+
+    *) Bugfix: memory leak during reconfiguration when using the PCRE2
+       library.
+       Thanks to ZhenZhong Wu.
+
+    *) Bugfixes and improvements in HTTP/3.
+
+
+Changes with nginx 1.25.2                                        15 Aug 2023
+
+    *) Feature: path MTU discovery when using HTTP/3.
+
+    *) Feature: TLS_AES_128_CCM_SHA256 cipher suite support when using
+       HTTP/3.
+
+    *) Change: now nginx uses appname "nginx" when loading OpenSSL
+       configuration.
+
+    *) Change: now nginx does not try to load OpenSSL configuration if the
+       --with-openssl option was used to built OpenSSL and the OPENSSL_CONF
+       environment variable is not set.
+
+    *) Bugfix: in the $body_bytes_sent variable when using HTTP/3.
+
+    *) Bugfix: in HTTP/3.
+
+
+Changes with nginx 1.25.1                                        13 Jun 2023
+
+    *) Feature: the "http2" directive, which enables HTTP/2 on a per-server
+       basis; the "http2" parameter of the "listen" directive is now
+       deprecated.
+
+    *) Change: HTTP/2 server push support has been removed.
+
+    *) Change: the deprecated "ssl" directive is not supported anymore.
+
+    *) Bugfix: in HTTP/3 when using OpenSSL.
+
+
+Changes with nginx 1.25.0                                        23 May 2023
+
+    *) Feature: experimental HTTP/3 support.
+
+
+Changes with nginx 1.24.0                                        11 Apr 2023
+
+    *) 1.24.x stable branch.
+
+
+Changes with nginx 1.23.4                                        28 Mar 2023
+
+    *) Change: now TLSv1.3 protocol is enabled by default.
+
+    *) Change: now nginx issues a warning if protocol parameters of a
+       listening socket are redefined.
+
+    *) Change: now nginx closes connections with lingering if pipelining was
+       used by the client.
+
+    *) Feature: byte ranges support in the ngx_http_gzip_static_module.
+
+    *) Bugfix: port ranges in the "listen" directive did not work; the bug
+       had appeared in 1.23.3.
+       Thanks to Valentin Bartenev.
+
+    *) Bugfix: incorrect location might be chosen to process a request if a
+       prefix location longer than 255 characters was used in the
+       configuration.
+
+    *) Bugfix: non-ASCII characters in file names on Windows were not
+       supported by the ngx_http_autoindex_module, the ngx_http_dav_module,
+       and the "include" directive.
+
+    *) Change: the logging level of the "data length too long", "length too
+       short", "bad legacy version", "no shared signature algorithms", "bad
+       digest length", "missing sigalgs extension", "encrypted length too
+       long", "bad length", "bad key update", "mixed handshake and non
+       handshake data", "ccs received early", "data between ccs and
+       finished", "packet length too long", "too many warn alerts", "record
+       too small", and "got a fin before a ccs" SSL errors has been lowered
+       from "crit" to "info".
+
+    *) Bugfix: a socket leak might occur when using HTTP/2 and the
+       "error_page" directive to redirect errors with code 400.
+
+    *) Bugfix: messages about logging to syslog errors did not contain
+       information that the errors happened while logging to syslog.
+       Thanks to Safar Safarly.
+
+    *) Workaround: "gzip filter failed to use preallocated memory" alerts
+       appeared in logs when using zlib-ng.
+
+    *) Bugfix: in the mail proxy server.
+
+
+Changes with nginx 1.23.3                                        13 Dec 2022
+
+    *) Bugfix: an error might occur when reading PROXY protocol version 2
+       header with large number of TLVs.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if SSI
+       was used to process subrequests created by other modules.
+       Thanks to Ciel Zhao.
+
+    *) Workaround: when a hostname used in the "listen" directive resolves
+       to multiple addresses, nginx now ignores duplicates within these
+       addresses.
+
+    *) Bugfix: nginx might hog CPU during unbuffered proxying if SSL
+       connections to backends were used.
+
+
+Changes with nginx 1.23.2                                        19 Oct 2022
+
+    *) Security: processing of a specially crafted mp4 file by the
+       ngx_http_mp4_module might cause a worker process crash, worker
+       process memory disclosure, or might have potential other impact
+       (CVE-2022-41741, CVE-2022-41742).
+
+    *) Feature: the "$proxy_protocol_tlv_..." variables.
+
+    *) Feature: TLS session tickets encryption keys are now automatically
+       rotated when using shared memory in the "ssl_session_cache"
+       directive.
+
+    *) Change: the logging level of the "bad record type" SSL errors has
+       been lowered from "crit" to "info".
+       Thanks to Murilo Andrade.
+
+    *) Change: now when using shared memory in the "ssl_session_cache"
+       directive the "could not allocate new session" errors are logged at
+       the "warn" level instead of "alert" and not more often than once per
+       second.
+
+    *) Bugfix: nginx/Windows could not be built with OpenSSL 3.0.x.
+
+    *) Bugfix: in logging of the PROXY protocol errors.
+       Thanks to Sergey Brester.
+
+    *) Workaround: shared memory from the "ssl_session_cache" directive was
+       spent on sessions using TLS session tickets when using TLSv1.3 with
+       OpenSSL.
+
+    *) Workaround: timeout specified with the "ssl_session_timeout"
+       directive did not work when using TLSv1.3 with OpenSSL or BoringSSL.
+
+
+Changes with nginx 1.23.1                                        19 Jul 2022
+
+    *) Feature: memory usage optimization in configurations with SSL
+       proxying.
+
+    *) Feature: looking up of IPv4 addresses while resolving now can be
+       disabled with the "ipv4=off" parameter of the "resolver" directive.
+
+    *) Change: the logging level of the "bad key share", "bad extension",
+       "bad cipher", and "bad ecpoint" SSL errors has been lowered from
+       "crit" to "info".
+
+    *) Bugfix: while returning byte ranges nginx did not remove the
+       "Content-Range" header line if it was present in the original backend
+       response.
+
+    *) Bugfix: a proxied response might be truncated during reconfiguration
+       on Linux; the bug had appeared in 1.17.5.
+
+
+Changes with nginx 1.23.0                                        21 Jun 2022
+
+    *) Change in internal API: now header lines are represented as linked
+       lists.
+
+    *) Change: now nginx combines arbitrary header lines with identical
+       names when sending to FastCGI, SCGI, and uwsgi backends, in the
+       $r->header_in() method of the ngx_http_perl_module, and during lookup
+       of the "$http_...", "$sent_http_...", "$sent_trailer_...",
+       "$upstream_http_...", and "$upstream_trailer_..." variables.
+
+    *) Bugfix: if there were multiple "Vary" header lines in the backend
+       response, nginx only used the last of them when caching.
+
+    *) Bugfix: if there were multiple "WWW-Authenticate" header lines in the
+       backend response and errors with code 401 were intercepted or the
+       "auth_request" directive was used, nginx only sent the first of the
+       header lines to the client.
+
+    *) Change: the logging level of the "application data after close
+       notify" SSL errors has been lowered from "crit" to "info".
+
+    *) Bugfix: connections might hang if nginx was built on Linux 2.6.17 or
+       newer, but was used on systems without EPOLLRDHUP support, notably
+       with epoll emulation layers; the bug had appeared in 1.17.5.
+       Thanks to Marcus Ball.
+
+    *) Bugfix: nginx did not cache the response if the "Expires" response
+       header line disabled caching, but following "Cache-Control" header
+       line enabled caching.
+
+
+Changes with nginx 1.21.6                                        25 Jan 2022
+
+    *) Bugfix: when using EPOLLEXCLUSIVE on Linux client connections were
+       unevenly distributed among worker processes.
+
+    *) Bugfix: nginx returned the "Connection: keep-alive" header line in
+       responses during graceful shutdown of old worker processes.
+
+    *) Bugfix: in the "ssl_session_ticket_key" when using TLSv1.3.
+
+
+Changes with nginx 1.21.5                                        28 Dec 2021
+
+    *) Change: now nginx is built with the PCRE2 library by default.
+
+    *) Change: now nginx always uses sendfile(SF_NODISKIO) on FreeBSD.
+
+    *) Feature: support for sendfile(SF_NOCACHE) on FreeBSD.
+
+    *) Feature: the $ssl_curve variable.
+
+    *) Bugfix: connections might hang when using HTTP/2 without SSL with the
+       "sendfile" and "aio" directives.
+
+
+Changes with nginx 1.21.4                                        02 Nov 2021
+
+    *) Change: support for NPN instead of ALPN to establish HTTP/2
+       connections has been removed.
+
+    *) Change: now nginx rejects SSL connections if ALPN is used by the
+       client, but no supported protocols can be negotiated.
+
+    *) Change: the default value of the "sendfile_max_chunk" directive was
+       changed to 2 megabytes.
+
+    *) Feature: the "proxy_half_close" directive in the stream module.
+
+    *) Feature: the "ssl_alpn" directive in the stream module.
+
+    *) Feature: the $ssl_alpn_protocol variable.
+
+    *) Feature: support for SSL_sendfile() when using OpenSSL 3.0.
+
+    *) Feature: the "mp4_start_key_frame" directive in the
+       ngx_http_mp4_module.
+       Thanks to Tracey Jaquith.
+
+    *) Bugfix: in the $content_length variable when using chunked transfer
+       encoding.
+
+    *) Bugfix: after receiving a response with incorrect length from a
+       proxied backend nginx might nevertheless cache the connection.
+       Thanks to Awdhesh Mathpal.
+
+    *) Bugfix: invalid headers from backends were logged at the "info" level
+       instead of "error"; the bug had appeared in 1.21.1.
+
+    *) Bugfix: requests might hang when using HTTP/2 and the "aio_write"
+       directive.
+
+
+Changes with nginx 1.21.3                                        07 Sep 2021
+
+    *) Change: optimization of client request body reading when using
+       HTTP/2.
+
+    *) Bugfix: in request body filters internal API when using HTTP/2 and
+       buffering of the data being processed.
+
+
+Changes with nginx 1.21.2                                        31 Aug 2021
+
+    *) Change: now nginx rejects HTTP/1.0 requests with the
+       "Transfer-Encoding" header line.
+
+    *) Change: export ciphers are no longer supported.
+
+    *) Feature: OpenSSL 3.0 compatibility.
+
+    *) Feature: the "Auth-SSL-Protocol" and "Auth-SSL-Cipher" header lines
+       are now passed to the mail proxy authentication server.
+       Thanks to Rob Mueller.
+
+    *) Feature: request body filters API now permits buffering of the data
+       being processed.
+
+    *) Bugfix: backend SSL connections in the stream module might hang after
+       an SSL handshake.
+
+    *) Bugfix: the security level, which is available in OpenSSL 1.1.0 or
+       newer, did not affect loading of the server certificates when set
+       with "@SECLEVEL=N" in the "ssl_ciphers" directive.
+
+    *) Bugfix: SSL connections with gRPC backends might hang if select,
+       poll, or /dev/poll methods were used.
+
+    *) Bugfix: when using HTTP/2 client request body was always written to
+       disk if the "Content-Length" header line was not present in the
+       request.
+
+
+Changes with nginx 1.21.1                                        06 Jul 2021
+
+    *) Change: now nginx always returns an error for the CONNECT method.
+
+    *) Change: now nginx always returns an error if both "Content-Length"
+       and "Transfer-Encoding" header lines are present in the request.
+
+    *) Change: now nginx always returns an error if spaces or control
+       characters are used in the request line.
+
+    *) Change: now nginx always returns an error if spaces or control
+       characters are used in a header name.
+
+    *) Change: now nginx always returns an error if spaces or control
+       characters are used in the "Host" request header line.
+
+    *) Change: optimization of configuration testing when using many
+       listening sockets.
+
+    *) Bugfix: nginx did not escape """, "<", ">", "\", "^", "`", "{", "|",
+       and "}" characters when proxying with changed URI.
+
+    *) Bugfix: SSL variables might be empty when used in logs; the bug had
+       appeared in 1.19.5.
+
+    *) Bugfix: keepalive connections with gRPC backends might not be closed
+       after receiving a GOAWAY frame.
+
+    *) Bugfix: reduced memory consumption for long-lived requests when
+       proxying with more than 64 buffers.
+
+
+Changes with nginx 1.21.0                                        25 May 2021
+
+    *) Security: 1-byte memory overwrite might occur during DNS server
+       response processing if the "resolver" directive was used, allowing an
+       attacker who is able to forge UDP packets from the DNS server to
+       cause worker process crash or, potentially, arbitrary code execution
+       (CVE-2021-23017).
+
+    *) Feature: variables support in the "proxy_ssl_certificate",
+       "proxy_ssl_certificate_key" "grpc_ssl_certificate",
+       "grpc_ssl_certificate_key", "uwsgi_ssl_certificate", and
+       "uwsgi_ssl_certificate_key" directives.
+
+    *) Feature: the "max_errors" directive in the mail proxy module.
+
+    *) Feature: the mail proxy module supports POP3 and IMAP pipelining.
+
+    *) Feature: the "fastopen" parameter of the "listen" directive in the
+       stream module.
+       Thanks to Anbang Wen.
+
+    *) Bugfix: special characters were not escaped during automatic redirect
+       with appended trailing slash.
+
+    *) Bugfix: connections with clients in the mail proxy module might be
+       closed unexpectedly when using SMTP pipelining.
+
+
+Changes with nginx 1.19.10                                       13 Apr 2021
+
+    *) Change: the default value of the "keepalive_requests" directive was
+       changed to 1000.
+
+    *) Feature: the "keepalive_time" directive.
+
+    *) Feature: the $connection_time variable.
+
+    *) Workaround: "gzip filter failed to use preallocated memory" alerts
+       appeared in logs when using zlib-ng.
+
+
+Changes with nginx 1.19.9                                        30 Mar 2021
+
+    *) Bugfix: nginx could not be built with the mail proxy module, but
+       without the ngx_mail_ssl_module; the bug had appeared in 1.19.8.
+
+    *) Bugfix: "upstream sent response body larger than indicated content
+       length" errors might occur when working with gRPC backends; the bug
+       had appeared in 1.19.1.
+
+    *) Bugfix: nginx might not close a connection till keepalive timeout
+       expiration if the connection was closed by the client while
+       discarding the request body.
+
+    *) Bugfix: nginx might not detect that a connection was already closed
+       by the client when waiting for auth_delay or limit_req delay, or when
+       working with backends.
+
+    *) Bugfix: in the eventport method.
+
+
+Changes with nginx 1.19.8                                        09 Mar 2021
+
+    *) Feature: flags in the "proxy_cookie_flags" directive can now contain
+       variables.
+
+    *) Feature: the "proxy_protocol" parameter of the "listen" directive,
+       the "proxy_protocol" and "set_real_ip_from" directives in mail proxy.
+
+    *) Bugfix: HTTP/2 connections were immediately closed when using
+       "keepalive_timeout 0"; the bug had appeared in 1.19.7.
+
+    *) Bugfix: some errors were logged as unknown if nginx was built with
+       glibc 2.32.
+
+    *) Bugfix: in the eventport method.
+
+
+Changes with nginx 1.19.7                                        16 Feb 2021
+
+    *) Change: connections handling in HTTP/2 has been changed to better
+       match HTTP/1.x; the "http2_recv_timeout", "http2_idle_timeout", and
+       "http2_max_requests" directives have been removed, the
+       "keepalive_timeout" and "keepalive_requests" directives should be
+       used instead.
+
+    *) Change: the "http2_max_field_size" and "http2_max_header_size"
+       directives have been removed, the "large_client_header_buffers"
+       directive should be used instead.
+
+    *) Feature: now, if free worker connections are exhausted, nginx starts
+       closing not only keepalive connections, but also connections in
+       lingering close.
+
+    *) Bugfix: "zero size buf in output" alerts might appear in logs if an
+       upstream server returned an incorrect response during unbuffered
+       proxying; the bug had appeared in 1.19.1.
+
+    *) Bugfix: HEAD requests were handled incorrectly if the "return"
+       directive was used with the "image_filter" or "xslt_stylesheet"
+       directives.
+
+    *) Bugfix: in the "add_trailer" directive.
+
+
+Changes with nginx 1.19.6                                        15 Dec 2020
+
+    *) Bugfix: "no live upstreams" errors if a "server" inside "upstream"
+       block was marked as "down".
+
+    *) Bugfix: a segmentation fault might occur in a worker process if HTTPS
+       was used; the bug had appeared in 1.19.5.
+
+    *) Bugfix: nginx returned the 400 response on requests like
+       "GET http://example.com?args HTTP/1.0".
+
+    *) Bugfix: in the ngx_http_flv_module and ngx_http_mp4_module.
+       Thanks to Chris Newton.
+
+
+Changes with nginx 1.19.5                                        24 Nov 2020
+
+    *) Feature: the -e switch.
+
+    *) Feature: the same source files can now be specified in different
+       modules while building addon modules.
+
+    *) Bugfix: SSL shutdown did not work when lingering close was used.
+
+    *) Bugfix: "upstream sent frame for closed stream" errors might occur
+       when working with gRPC backends.
+
+    *) Bugfix: in request body filters internal API.
+
+
+Changes with nginx 1.19.4                                        27 Oct 2020
+
+    *) Feature: the "ssl_conf_command", "proxy_ssl_conf_command",
+       "grpc_ssl_conf_command", and "uwsgi_ssl_conf_command" directives.
+
+    *) Feature: the "ssl_reject_handshake" directive.
+
+    *) Feature: the "proxy_smtp_auth" directive in mail proxy.
+
+
+Changes with nginx 1.19.3                                        29 Sep 2020
+
+    *) Feature: the ngx_stream_set_module.
+
+    *) Feature: the "proxy_cookie_flags" directive.
+
+    *) Feature: the "userid_flags" directive.
+
+    *) Bugfix: the "stale-if-error" cache control extension was erroneously
+       applied if backend returned a response with status code 500, 502,
+       503, 504, 403, 404, or 429.
+
+    *) Bugfix: "[crit] cache file ... has too long header" messages might
+       appear in logs if caching was used and the backend returned responses
+       with the "Vary" header line.
+
+    *) Workaround: "[crit] SSL_write() failed" messages might appear in logs
+       when using OpenSSL 1.1.1.
+
+    *) Bugfix: "SSL_shutdown() failed (SSL: ... bad write retry)" messages
+       might appear in logs; the bug had appeared in 1.19.2.
+
+    *) Bugfix: a segmentation fault might occur in a worker process when
+       using HTTP/2 if errors with code 400 were redirected to a proxied
+       location using the "error_page" directive.
+
+    *) Bugfix: socket leak when using HTTP/2 and subrequests in the njs
+       module.
+
+
+Changes with nginx 1.19.2                                        11 Aug 2020
+
+    *) Change: now nginx starts closing keepalive connections before all
+       free worker connections are exhausted, and logs a warning about this
+       to the error log.
+
+    *) Change: optimization of client request body reading when using
+       chunked transfer encoding.
+
+    *) Bugfix: memory leak if the "ssl_ocsp" directive was used.
+
+    *) Bugfix: "zero size buf in output" alerts might appear in logs if a
+       FastCGI server returned an incorrect response; the bug had appeared
+       in 1.19.1.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if
+       different large_client_header_buffers sizes were used in different
+       virtual servers.
+
+    *) Bugfix: SSL shutdown might not work.
+
+    *) Bugfix: "SSL_shutdown() failed (SSL: ... bad write retry)" messages
+       might appear in logs.
+
+    *) Bugfix: in the ngx_http_slice_module.
+
+    *) Bugfix: in the ngx_http_xslt_filter_module.
+
+
+Changes with nginx 1.19.1                                        07 Jul 2020
+
+    *) Change: the "lingering_close", "lingering_time", and
+       "lingering_timeout" directives now work when using HTTP/2.
+
+    *) Change: now extra data sent by a backend are always discarded.
+
+    *) Change: now after receiving a too short response from a FastCGI
+       server nginx tries to send the available part of the response to the
+       client, and then closes the client connection.
+
+    *) Change: now after receiving a response with incorrect length from a
+       gRPC backend nginx stops response processing with an error.
+
+    *) Feature: the "min_free" parameter of the "proxy_cache_path",
+       "fastcgi_cache_path", "scgi_cache_path", and "uwsgi_cache_path"
+       directives.
+       Thanks to Adam Bambuch.
+
+    *) Bugfix: nginx did not delete unix domain listen sockets during
+       graceful shutdown on the SIGQUIT signal.
+
+    *) Bugfix: zero length UDP datagrams were not proxied.
+
+    *) Bugfix: proxying to uwsgi backends using SSL might not work.
+       Thanks to Guanzhong Chen.
+
+    *) Bugfix: in error handling when using the "ssl_ocsp" directive.
+
+    *) Bugfix: on XFS and NFS file systems disk cache size might be
+       calculated incorrectly.
+
+    *) Bugfix: "negative size buf in writer" alerts might appear in logs if
+       a memcached server returned a malformed response.
+
+
+Changes with nginx 1.19.0                                        26 May 2020
+
+    *) Feature: client certificate validation with OCSP.
+
+    *) Bugfix: "upstream sent frame for closed stream" errors might occur
+       when working with gRPC backends.
+
+    *) Bugfix: OCSP stapling might not work if the "resolver" directive was
+       not specified.
+
+    *) Bugfix: connections with incorrect HTTP/2 preface were not logged.
+
+
+Changes with nginx 1.17.10                                       14 Apr 2020
+
+    *) Feature: the "auth_delay" directive.
+
+
+Changes with nginx 1.17.9                                        03 Mar 2020
+
+    *) Change: now nginx does not allow several "Host" request header lines.
+
+    *) Bugfix: nginx ignored additional "Transfer-Encoding" request header
+       lines.
+
+    *) Bugfix: socket leak when using HTTP/2.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if OCSP
+       stapling was used.
+
+    *) Bugfix: in the ngx_http_mp4_module.
+
+    *) Bugfix: nginx used status code 494 instead of 400 if errors with code
+       494 were redirected with the "error_page" directive.
+
+    *) Bugfix: socket leak when using subrequests in the njs module and the
+       "aio" directive.
+
+
+Changes with nginx 1.17.8                                        21 Jan 2020
+
+    *) Feature: variables support in the "grpc_pass" directive.
+
+    *) Bugfix: a timeout might occur while handling pipelined requests in an
+       SSL connection; the bug had appeared in 1.17.5.
+
+    *) Bugfix: in the "debug_points" directive when using HTTP/2.
+       Thanks to Daniil Bondarev.
+
+
+Changes with nginx 1.17.7                                        24 Dec 2019
+
+    *) Bugfix: a segmentation fault might occur on start or during
+       reconfiguration if the "rewrite" directive with an empty replacement
+       string was used in the configuration.
+
+    *) Bugfix: a segmentation fault might occur in a worker process if the
+       "break" directive was used with the "alias" directive or with the
+       "proxy_pass" directive with a URI.
+
+    *) Bugfix: the "Location" response header line might contain garbage if
+       the request URI was rewritten to the one containing a null character.
+
+    *) Bugfix: requests with bodies were handled incorrectly when returning
+       redirections with the "error_page" directive; the bug had appeared in
+       0.7.12.
+
+    *) Bugfix: socket leak when using HTTP/2.
+
+    *) Bugfix: a timeout might occur while handling pipelined requests in an
+       SSL connection; the bug had appeared in 1.17.5.
+
+    *) Bugfix: in the ngx_http_dav_module.
+
+
+Changes with nginx 1.17.6                                        19 Nov 2019
+
+    *) Feature: the $proxy_protocol_server_addr and
+       $proxy_protocol_server_port variables.
+
+    *) Feature: the "limit_conn_dry_run" directive.
+
+    *) Feature: the $limit_req_status and $limit_conn_status variables.
+
+
+Changes with nginx 1.17.5                                        22 Oct 2019
+
+    *) Feature: now nginx uses ioctl(FIONREAD), if available, to avoid
+       reading from a fast connection for a long time.
+
+    *) Bugfix: incomplete escaped characters at the end of the request URI
+       were ignored.
+
+    *) Bugfix: "/." and "/.." at the end of the request URI were not
+       normalized.
+
+    *) Bugfix: in the "merge_slashes" directive.
+
+    *) Bugfix: in the "ignore_invalid_headers" directive.
+       Thanks to Alan Kemp.
+
+    *) Bugfix: nginx could not be built with MinGW-w64 gcc 8.1 or newer.
+
+
+Changes with nginx 1.17.4                                        24 Sep 2019
+
+    *) Change: better detection of incorrect client behavior in HTTP/2.
+
+    *) Change: in handling of not fully read client request body when
+       returning errors in HTTP/2.
+
+    *) Bugfix: the "worker_shutdown_timeout" directive might not work when
+       using HTTP/2.
+
+    *) Bugfix: a segmentation fault might occur in a worker process when
+       using HTTP/2 and the "proxy_request_buffering" directive.
+
+    *) Bugfix: the ECONNABORTED error log level was "crit" instead of
+       "error" on Windows when using SSL.
+
+    *) Bugfix: nginx ignored extra data when using chunked transfer
+       encoding.
+
+    *) Bugfix: nginx always returned the 500 error if the "return" directive
+       was used and an error occurred during reading client request body.
+
+    *) Bugfix: in memory allocation error handling.
+
+
 Changes with nginx 1.17.3                                        13 Aug 2019
 
     *) Security: when using HTTP/2 a client might cause excessive memory
@@ -71,16 +1641,12 @@ Changes with nginx 1.17.0                                        21 May 2019
 
     *) Bugfix: in byte ranges processing.
 
-Changes with nginx 1.16.0                                        23 Apr 2019
-
-    *) 1.16.x stable branch.
-
 
 Changes with nginx 1.15.12                                       16 Apr 2019
 
     *) Bugfix: a segmentation fault might occur in a worker process if
-variables were used in the "ssl_certificate" or "ssl_certificate_key"
-directives and OCSP stapling was enabled.
+       variables were used in the "ssl_certificate" or "ssl_certificate_key"
+       directives and OCSP stapling was enabled.
 
 
 Changes with nginx 1.15.11                                       09 Apr 2019
@@ -91,18 +1657,19 @@ Changes with nginx 1.15.11                                       09 Apr 2019
 Changes with nginx 1.15.10                                       26 Mar 2019
 
     *) Change: when using a hostname in the "listen" directive nginx now
-creates listening sockets for all addresses the hostname resolves to
-(previously, only the first address was used).
+       creates listening sockets for all addresses the hostname resolves to
+       (previously, only the first address was used).
 
     *) Feature: port ranges in the "listen" directive.
 
     *) Feature: loading of SSL certificates and secret keys from variables.
 
     *) Workaround: the $ssl_server_name variable might be empty when using
-OpenSSL 1.1.1.
+       OpenSSL 1.1.1.
 
     *) Bugfix: nginx/Windows could not be built with Visual Studio 2015 or
-newer; the bug had appeared in 1.15.9.
+       newer; the bug had appeared in 1.15.9.
+
 
 Changes with nginx 1.15.9                                        26 Feb 2019
 
@@ -1631,7 +3198,7 @@ Changes with nginx 1.7.4                                         05 Aug 2014
     *) Change: URI escaping now uses uppercase hexadecimal digits.
        Thanks to Piotr Sikora.
 
-    *) Feature: now nginx can be build with BoringSSL and LibreSSL.
+    *) Feature: now nginx can be built with BoringSSL and LibreSSL.
        Thanks to Piotr Sikora.
 
     *) Bugfix: requests might hang if resolver was used and a DNS server
@@ -6907,7 +8474,7 @@ Changes with nginx 0.3.30                                        22 Feb 2006
     *) Change: the ECONNABORTED error log level was changed to "error" from
        "crit".
 
-    *) Bugfix: the ngx_http_perl_module could not be build without the
+    *) Bugfix: the ngx_http_perl_module could not be built without the
        ngx_http_ssi_filter_module.
 
     *) Bugfix: nginx could not be built on i386 platform, if the PIC was

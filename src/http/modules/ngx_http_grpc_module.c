@@ -25,7 +25,10 @@ typedef struct {
     ngx_array_t               *headers_source;
 
     ngx_str_t                  host;
-    ngx_uint_t                 host_set;
+    ngx_http_complex_value_t  *host_value;
+
+    ngx_array_t               *grpc_lengths;
+    ngx_array_t               *grpc_values;
 
 #if (NGX_HTTP_SSL)
     ngx_uint_t                 ssl;
@@ -34,9 +37,7 @@ typedef struct {
     ngx_uint_t                 ssl_verify_depth;
     ngx_str_t                  ssl_trusted_certificate;
     ngx_str_t                  ssl_crl;
-    ngx_str_t                  ssl_certificate;
-    ngx_str_t                  ssl_certificate_key;
-    ngx_array_t               *ssl_passwords;
+    ngx_array_t               *ssl_conf_commands;
 #endif
 } ngx_http_grpc_loc_conf_t;
 
@@ -81,6 +82,8 @@ typedef struct {
     ngx_uint_t                 pings;
     ngx_uint_t                 settings;
 
+    off_t                      length;
+
     ssize_t                    send_window;
     size_t                     recv_window;
 
@@ -103,6 +106,7 @@ typedef struct {
     ngx_str_t                  value;
 
     u_char                    *field_end;
+    size_t                     header_limit;
     size_t                     field_length;
     size_t                     field_rest;
     u_char                     field_state;
@@ -117,8 +121,12 @@ typedef struct {
     unsigned                   end_stream:1;
     unsigned                   done:1;
     unsigned                   status:1;
+    unsigned                   rst:1;
+    unsigned                   goaway:1;
 
     ngx_http_request_t        *request;
+
+    ngx_str_t                  host;
 } ngx_http_grpc_ctx_t;
 
 
@@ -135,6 +143,8 @@ typedef struct {
 } ngx_http_grpc_frame_t;
 
 
+static ngx_int_t ngx_http_grpc_eval(ngx_http_request_t *r,
+    ngx_http_grpc_ctx_t *ctx, ngx_http_grpc_loc_conf_t *glcf);
 static ngx_int_t ngx_http_grpc_create_request(ngx_http_request_t *r);
 static ngx_int_t ngx_http_grpc_reinit_request(ngx_http_request_t *r);
 static ngx_int_t ngx_http_grpc_body_output_filter(void *data, ngx_chain_t *in);
@@ -196,8 +206,14 @@ static char *ngx_http_grpc_pass(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
 #if (NGX_HTTP_SSL)
+static char *ngx_http_grpc_ssl_certificate_cache(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_http_grpc_ssl_password_file(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
+static char *ngx_http_grpc_ssl_conf_command_check(ngx_conf_t *cf, void *post,
+    void *data);
+static ngx_int_t ngx_http_grpc_merge_ssl(ngx_conf_t *cf,
+    ngx_http_grpc_loc_conf_t *conf, ngx_http_grpc_loc_conf_t *prev);
 static ngx_int_t ngx_http_grpc_set_ssl(ngx_conf_t *cf,
     ngx_http_grpc_loc_conf_t *glcf);
 #endif
@@ -232,6 +248,9 @@ static ngx_conf_bitmask_t  ngx_http_grpc_ssl_protocols[] = {
     { ngx_null_string, 0 }
 };
 
+static ngx_conf_post_t  ngx_http_grpc_ssl_conf_command_post =
+    { ngx_http_grpc_ssl_conf_command_check };
+
 #endif
 
 
@@ -256,6 +275,20 @@ static ngx_command_t  ngx_http_grpc_commands[] = {
       ngx_conf_set_flag_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_grpc_loc_conf_t, upstream.socket_keepalive),
+      NULL },
+
+    { ngx_string("grpc_socket_rcvbuf"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.socket_rcvbuf),
+      NULL },
+
+    { ngx_string("grpc_socket_sndbuf"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.socket_sndbuf),
       NULL },
 
     { ngx_string("grpc_connect_timeout"),
@@ -284,7 +317,7 @@ static ngx_command_t  ngx_http_grpc_commands[] = {
       ngx_conf_set_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_grpc_loc_conf_t, upstream.buffer_size),
-      NULL },
+      &ngx_conf_size_nonzero_post },
 
     { ngx_string("grpc_read_timeout"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
@@ -409,16 +442,23 @@ static ngx_command_t  ngx_http_grpc_commands[] = {
 
     { ngx_string("grpc_ssl_certificate"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
+      ngx_http_set_complex_value_zero_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_grpc_loc_conf_t, ssl_certificate),
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.ssl_certificate),
       NULL },
 
     { ngx_string("grpc_ssl_certificate_key"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
-      ngx_conf_set_str_slot,
+      ngx_http_set_complex_value_zero_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_grpc_loc_conf_t, ssl_certificate_key),
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.ssl_certificate_key),
+      NULL },
+
+    { ngx_string("grpc_ssl_certificate_cache"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE123,
+      ngx_http_grpc_ssl_certificate_cache,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
       NULL },
 
     { ngx_string("grpc_ssl_password_file"),
@@ -428,6 +468,50 @@ static ngx_command_t  ngx_http_grpc_commands[] = {
       0,
       NULL },
 
+    { ngx_string("grpc_ssl_conf_command"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+      ngx_conf_set_keyval_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, ssl_conf_commands),
+      &ngx_http_grpc_ssl_conf_command_post },
+
+#if (T_NGX_SSL_NTLS)
+    { ngx_string("grpc_enable_ntls"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_set_complex_value_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.enable_ntls),
+      NULL },
+
+    { ngx_string("grpc_ssl_enc_certificate"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.enc_certificate),
+      NULL },
+
+    { ngx_string("grpc_ssl_enc_certificate_key"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.enc_certificate_key),
+      NULL },
+
+    { ngx_string("grpc_ssl_sign_certificate"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.sign_certificate),
+      NULL },
+
+    { ngx_string("grpc_ssl_sign_certificate_key"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_grpc_loc_conf_t, upstream.sign_certificate_key),
+      NULL },
+
+#endif
 #endif
 
       ngx_null_command
@@ -482,6 +566,7 @@ static ngx_keyval_t  ngx_http_grpc_headers[] = {
     { ngx_string("TE"), ngx_string("$grpc_internal_trailers") },
     { ngx_string("Host"), ngx_string("") },
     { ngx_string("Connection"), ngx_string("") },
+    { ngx_string("Proxy-Connection"), ngx_string("") },
     { ngx_string("Transfer-Encoding"), ngx_string("") },
     { ngx_string("Keep-Alive"), ngx_string("") },
     { ngx_string("Expect"), ngx_string("") },
@@ -524,22 +609,40 @@ ngx_http_grpc_handler(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_grpc_ctx_t));
+    if (ctx == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ctx->request = r;
+
+    ngx_http_set_ctx(r, ctx, ngx_http_grpc_module);
+
     glcf = ngx_http_get_module_loc_conf(r, ngx_http_grpc_module);
 
     u = r->upstream;
 
-#if (NGX_HTTP_SSL)
-    u->ssl = (glcf->upstream.ssl != NULL);
+    if (glcf->grpc_lengths == NULL) {
+        ctx->host = glcf->host;
 
-    if (u->ssl) {
-        ngx_str_set(&u->schema, "grpcs://");
+#if (NGX_HTTP_SSL)
+        u->ssl = glcf->ssl;
+
+        if (u->ssl) {
+            ngx_str_set(&u->schema, "grpcs://");
+
+        } else {
+            ngx_str_set(&u->schema, "grpc://");
+        }
+#else
+        ngx_str_set(&u->schema, "grpc://");
+#endif
 
     } else {
-        ngx_str_set(&u->schema, "grpc://");
+        if (ngx_http_grpc_eval(r, ctx, glcf) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
     }
-#else
-    ngx_str_set(&u->schema, "grpc://");
-#endif
 
     u->output.tag = (ngx_buf_tag_t) &ngx_http_grpc_module;
 
@@ -550,15 +653,6 @@ ngx_http_grpc_handler(ngx_http_request_t *r)
     u->process_header = ngx_http_grpc_process_header;
     u->abort_request = ngx_http_grpc_abort_request;
     u->finalize_request = ngx_http_grpc_finalize_request;
-
-    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_grpc_ctx_t));
-    if (ctx == NULL) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    ctx->request = r;
-
-    ngx_http_set_ctx(r, ctx, ngx_http_grpc_module);
 
     u->input_filter_init = ngx_http_grpc_filter_init;
     u->input_filter = ngx_http_grpc_filter;
@@ -577,16 +671,117 @@ ngx_http_grpc_handler(ngx_http_request_t *r)
 
 
 static ngx_int_t
+ngx_http_grpc_eval(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
+    ngx_http_grpc_loc_conf_t *glcf)
+{
+    size_t                add;
+    ngx_url_t             url;
+    ngx_http_upstream_t  *u;
+
+    ngx_memzero(&url, sizeof(ngx_url_t));
+
+    if (ngx_http_script_run(r, &url.url, glcf->grpc_lengths->elts, 0,
+                            glcf->grpc_values->elts)
+        == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    if (url.url.len > 7
+        && ngx_strncasecmp(url.url.data, (u_char *) "grpc://", 7) == 0)
+    {
+        add = 7;
+
+    } else if (url.url.len > 8
+               && ngx_strncasecmp(url.url.data, (u_char *) "grpcs://", 8) == 0)
+    {
+
+#if (NGX_HTTP_SSL)
+        add = 8;
+        r->upstream->ssl = 1;
+#else
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "grpcs protocol requires SSL support");
+        return NGX_ERROR;
+#endif
+
+    } else {
+        add = 0;
+    }
+
+    u = r->upstream;
+
+    if (add) {
+        u->schema.len = add;
+        u->schema.data = url.url.data;
+
+        url.url.data += add;
+        url.url.len -= add;
+
+    } else {
+        ngx_str_set(&u->schema, "grpc://");
+    }
+
+    url.no_resolve = 1;
+
+    if (ngx_parse_url(r->pool, &url) != NGX_OK) {
+        if (url.err) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "%s in upstream \"%V\"", url.err, &url.url);
+        }
+
+        return NGX_ERROR;
+    }
+
+    u->resolved = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_resolved_t));
+    if (u->resolved == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (url.addrs) {
+        u->resolved->sockaddr = url.addrs[0].sockaddr;
+        u->resolved->socklen = url.addrs[0].socklen;
+        u->resolved->name = url.addrs[0].name;
+        u->resolved->naddrs = 1;
+    }
+
+    u->resolved->host = url.host;
+    u->resolved->port = url.port;
+    u->resolved->no_port = url.no_port;
+
+    if (url.family != AF_UNIX) {
+
+        if (url.no_port) {
+            ctx->host = url.host;
+
+        } else {
+            ctx->host.len = url.host.len + 1 + url.port_text.len;
+            ctx->host.data = url.host.data;
+        }
+
+    } else {
+        ngx_str_set(&ctx->host, "localhost");
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 ngx_http_grpc_create_request(ngx_http_request_t *r)
 {
-    u_char                       *p, *tmp, *key_tmp, *val_tmp, *headers_frame;
-    size_t                        len, tmp_len, key_len, val_len, uri_len;
+    u_char                       *p, *tmp, *key_tmp, *val_tmp, *headers_frame,
+                                 *headers_end;
+    size_t                        len, headers_len, tmp_len,
+                                  key_len, val_len, uri_len;
     uintptr_t                     escape;
     ngx_buf_t                    *b;
+    ngx_str_t                     host;
     ngx_uint_t                    i, next;
     ngx_chain_t                  *cl, *body;
     ngx_list_part_t              *part;
     ngx_table_elt_t              *header;
+    ngx_http_grpc_ctx_t          *ctx;
     ngx_http_upstream_t          *u;
     ngx_http_grpc_frame_t        *f;
     ngx_http_script_code_pt       code;
@@ -598,8 +793,12 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
 
     glcf = ngx_http_get_module_loc_conf(r, ngx_http_grpc_module);
 
+    ctx = ngx_http_get_module_ctx(r, ngx_http_grpc_module);
+
     len = sizeof(ngx_http_grpc_connection_start) - 1
           + sizeof(ngx_http_grpc_frame_t);             /* headers frame */
+
+    headers_len = 0;
 
     /* :method header */
 
@@ -608,6 +807,12 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
         tmp_len = 0;
 
     } else {
+        if (r->method_name.len > NGX_HTTP_V2_MAX_FIELD) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "too long http2 method: \"%V\"", &r->method_name);
+            return NGX_ERROR;
+        }
+
         len += 1 + NGX_HTTP_V2_INT_OCTETS + r->method_name.len;
         tmp_len = r->method_name.len;
     }
@@ -628,6 +833,12 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
         uri_len = r->uri.len + escape + sizeof("?") - 1 + r->args.len;
     }
 
+    if (uri_len > NGX_HTTP_V2_MAX_FIELD) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "too long http2 URI");
+        return NGX_ERROR;
+    }
+
     len += 1 + NGX_HTTP_V2_INT_OCTETS + uri_len;
 
     if (tmp_len < uri_len) {
@@ -636,12 +847,31 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
 
     /* :authority header */
 
-    if (!glcf->host_set) {
-        len += 1 + NGX_HTTP_V2_INT_OCTETS + glcf->host.len;
+    host.len = 0;
+#if (NGX_SUPPRESS_WARN)
+    host.data = NULL;
+#endif
 
-        if (tmp_len < glcf->host.len) {
-            tmp_len = glcf->host.len;
-        }
+    if (glcf->host_value
+        && ngx_http_complex_value(r, glcf->host_value, &host) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (host.len == 0) {
+        host = ctx->host;
+    }
+
+    if (host.len > NGX_HTTP_V2_MAX_FIELD) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "too long http2 host: \"%V\"", &host);
+        return NGX_ERROR;
+    }
+
+    len += 1 + NGX_HTTP_V2_INT_OCTETS + host.len;
+
+    if (tmp_len < host.len) {
+        tmp_len = host.len;
     }
 
     /* other headers */
@@ -667,8 +897,20 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
             continue;
         }
 
-        len += 1 + NGX_HTTP_V2_INT_OCTETS + key_len
-                 + NGX_HTTP_V2_INT_OCTETS + val_len;
+        if (key_len > NGX_HTTP_V2_MAX_FIELD) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "too long http2 header name");
+            return NGX_ERROR;
+        }
+
+        if (val_len > NGX_HTTP_V2_MAX_FIELD) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "too long http2 header value");
+            return NGX_ERROR;
+        }
+
+        headers_len += 1 + NGX_HTTP_V2_INT_OCTETS + key_len
+                         + NGX_HTTP_V2_INT_OCTETS + val_len;
 
         if (tmp_len < key_len) {
             tmp_len = key_len;
@@ -678,6 +920,8 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
             tmp_len = val_len;
         }
     }
+
+    len += headers_len;
 
     if (glcf->upstream.pass_request_headers) {
         part = &r->headers_in.headers.part;
@@ -699,6 +943,20 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
                               header[i].lowcase_key, header[i].key.len))
             {
                 continue;
+            }
+
+            if (header[i].key.len > NGX_HTTP_V2_MAX_FIELD) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "too long http2 header name: \"%V\"",
+                              &header[i].key);
+                return NGX_ERROR;
+            }
+
+            if (header[i].value.len > NGX_HTTP_V2_MAX_FIELD) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "too long http2 header value: \"%V: %V\"",
+                              &header[i].key, &header[i].value);
+                return NGX_ERROR;
             }
 
             len += 1 + NGX_HTTP_V2_INT_OCTETS + header[i].key.len
@@ -785,7 +1043,7 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
     }
 
 #if (NGX_HTTP_SSL)
-    if (glcf->ssl) {
+    if (u->ssl) {
         *b->last++ = ngx_http_v2_indexed(NGX_HTTP_V2_SCHEME_HTTPS_INDEX);
 
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -844,14 +1102,11 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
                        "grpc header: \":path: %V\"", &r->uri);
     }
 
-    if (!glcf->host_set) {
-        *b->last++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_AUTHORITY_INDEX);
-        b->last = ngx_http_v2_write_value(b->last, glcf->host.data,
-                                          glcf->host.len, tmp);
+    *b->last++ = ngx_http_v2_inc_indexed(NGX_HTTP_V2_AUTHORITY_INDEX);
+    b->last = ngx_http_v2_write_value(b->last, host.data, host.len, tmp);
 
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "grpc header: \":authority: %V\"", &glcf->host);
-    }
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "grpc header: \":authority: %V\"", &host);
 
     ngx_memzero(&e, sizeof(ngx_http_script_engine_t));
 
@@ -860,6 +1115,8 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
     e.flushed = 1;
 
     le.ip = glcf->headers.lengths->elts;
+
+    headers_end = b->last + headers_len;
 
     while (*(uintptr_t *) le.ip) {
 
@@ -885,22 +1142,58 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
             continue;
         }
 
+        if (headers_end - b->last < 1) {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "no buffer space in grpc create request");
+            return NGX_ERROR;
+        }
+
         *b->last++ = 0;
 
         e.pos = key_tmp;
+        e.end = key_tmp + tmp_len;
 
         code = *(ngx_http_script_code_pt *) e.ip;
         code((ngx_http_script_engine_t *) &e);
 
+        if (e.status) {
+            return NGX_ERROR;
+        }
+
+        key_len = e.pos - key_tmp;
+
+        if (headers_end - b->last
+            < (ssize_t) (NGX_HTTP_V2_INT_OCTETS + key_len))
+        {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "no buffer space in grpc create request");
+            return NGX_ERROR;
+        }
+
         b->last = ngx_http_v2_write_name(b->last, key_tmp, key_len, tmp);
 
         e.pos = val_tmp;
+        e.end = val_tmp + tmp_len;
 
         while (*(uintptr_t *) e.ip) {
             code = *(ngx_http_script_code_pt *) e.ip;
             code((ngx_http_script_engine_t *) &e);
         }
         e.ip += sizeof(uintptr_t);
+
+        if (e.status) {
+            return NGX_ERROR;
+        }
+
+        val_len = e.pos - val_tmp;
+
+        if (headers_end - b->last
+            < (ssize_t) (NGX_HTTP_V2_INT_OCTETS + val_len))
+        {
+            ngx_log_error(NGX_LOG_ALERT, r->connection->log, 0,
+                          "no buffer space in grpc create request");
+            return NGX_ERROR;
+        }
 
         b->last = ngx_http_v2_write_value(b->last, val_tmp, val_len, tmp);
 
@@ -1009,20 +1302,11 @@ ngx_http_grpc_create_request(ngx_http_request_t *r)
 
     f->flags |= NGX_HTTP_V2_END_HEADERS_FLAG;
 
-#if (NGX_DEBUG)
-    if (r->connection->log->log_level & NGX_LOG_DEBUG_HTTP) {
-        u_char  buf[512];
-        size_t  n, m;
-
-        n = ngx_min(b->last - b->pos, 256);
-        m = ngx_hex_dump(buf, b->pos, n) - buf;
-
-        ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "grpc header: %*s%s, len: %uz",
-                       m, buf, b->last - b->pos > 256 ? "..." : "",
-                       b->last - b->pos);
-    }
-#endif
+    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "grpc header: %*xs%s, len: %uz",
+                   (size_t) ngx_min(b->last - b->pos, 256), b->pos,
+                   b->last - b->pos > 256 ? "..." : "",
+                   b->last - b->pos);
 
     if (r->request_body_no_buffering) {
 
@@ -1089,7 +1373,12 @@ ngx_http_grpc_reinit_request(ngx_http_request_t *r)
     ctx->end_stream = 0;
     ctx->done = 0;
     ctx->status = 0;
+    ctx->rst = 0;
+    ctx->goaway = 0;
     ctx->connection = NULL;
+    ctx->in = NULL;
+    ctx->busy = NULL;
+    ctx->out = NULL;
 
     return NGX_OK;
 }
@@ -1106,7 +1395,7 @@ ngx_http_grpc_body_output_filter(void *data, ngx_chain_t *in)
     ngx_buf_t              *b;
     ngx_int_t               rc;
     ngx_uint_t              next, last;
-    ngx_chain_t            *cl, *out, **ll;
+    ngx_chain_t            *cl, *out, *ln, **ll;
     ngx_http_upstream_t    *u;
     ngx_http_grpc_ctx_t    *ctx;
     ngx_http_grpc_frame_t  *f;
@@ -1334,7 +1623,10 @@ ngx_http_grpc_body_output_filter(void *data, ngx_chain_t *in)
             last = 1;
         }
 
+        ln = in;
         in = in->next;
+
+        ngx_free_chain(r->pool, ln);
     }
 
     ctx->in = in;
@@ -1444,6 +1736,7 @@ ngx_http_grpc_body_output_filter(void *data, ngx_chain_t *in)
             && ctx->out == NULL
             && ctx->output_closed
             && !ctx->output_blocked
+            && !ctx->goaway
             && ctx->state == ngx_http_grpc_st_start)
         {
             u->keepalive = 1;
@@ -1471,20 +1764,11 @@ ngx_http_grpc_process_header(ngx_http_request_t *r)
     u = r->upstream;
     b = &u->buffer;
 
-#if (NGX_DEBUG)
-    if (r->connection->log->log_level & NGX_LOG_DEBUG_HTTP) {
-        u_char  buf[512];
-        size_t  n, m;
-
-        n = ngx_min(b->last - b->pos, 256);
-        m = ngx_hex_dump(buf, b->pos, n) - buf;
-
-        ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "grpc response: %*s%s, len: %uz",
-                       m, buf, b->last - b->pos > 256 ? "..." : "",
-                       b->last - b->pos);
-    }
-#endif
+    ngx_log_debug4(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "grpc response: %*xs%s, len: %uz",
+                   (size_t) ngx_min(b->last - b->pos, 256),
+                   b->pos, b->last - b->pos > 256 ? "..." : "",
+                   b->last - b->pos);
 
     ctx = ngx_http_grpc_get_ctx(r);
 
@@ -1601,6 +1885,8 @@ ngx_http_grpc_process_header(ngx_http_request_t *r)
 
                 return NGX_HTTP_UPSTREAM_INVALID_HEADER;
             }
+
+            ctx->goaway = 1;
 
             continue;
         }
@@ -1738,7 +2024,8 @@ ngx_http_grpc_process_header(ngx_http_request_t *r)
                         return NGX_HTTP_UPSTREAM_INVALID_HEADER;
                     }
 
-                    if (status < NGX_HTTP_OK) {
+                    if (status < NGX_HTTP_OK && status != NGX_HTTP_EARLY_HINTS)
+                    {
                         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                                       "upstream sent unexpected :status \"%V\"",
                                       status_line);
@@ -1771,11 +2058,19 @@ ngx_http_grpc_process_header(ngx_http_request_t *r)
                 h->lowcase_key = h->key.data;
                 h->hash = ngx_hash_key(h->key.data, h->key.len);
 
+                if (u->headers_in.status_n == NGX_HTTP_EARLY_HINTS) {
+                    continue;
+                }
+
                 hh = ngx_hash_find(&umcf->headers_in_hash, h->hash,
                                    h->lowcase_key, h->key.len);
 
-                if (hh && hh->handler(r, h, hh->offset) != NGX_OK) {
-                    return NGX_ERROR;
+                if (hh) {
+                    rc = hh->handler(r, h, hh->offset);
+
+                    if (rc != NGX_OK) {
+                        return rc;
+                    }
                 }
 
                 continue;
@@ -1788,13 +2083,28 @@ ngx_http_grpc_process_header(ngx_http_request_t *r)
                 ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                                "grpc header done");
 
+                if (u->headers_in.status_n == NGX_HTTP_EARLY_HINTS) {
+                    if (ctx->end_stream) {
+                        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                                      "upstream prematurely closed stream");
+                        return NGX_HTTP_UPSTREAM_INVALID_HEADER;
+                    }
+
+                    ctx->status = 0;
+                    return NGX_HTTP_UPSTREAM_EARLY_HINTS;
+                }
+
                 if (ctx->end_stream) {
-                    u->headers_in.content_length_n = 0;
+
+                    if (u->headers_in.content_length_n == -1) {
+                        u->headers_in.content_length_n = 0;
+                    }
 
                     if (ctx->in == NULL
                         && ctx->out == NULL
                         && ctx->output_closed
                         && !ctx->output_blocked
+                        && !ctx->goaway
                         && b->last == b->pos)
                     {
                         u->keepalive = 1;
@@ -1835,10 +2145,29 @@ ngx_http_grpc_filter_init(void *data)
     r = ctx->request;
     u = r->upstream;
 
-    u->length = 1;
+    if (u->headers_in.status_n == NGX_HTTP_NO_CONTENT
+        || u->headers_in.status_n == NGX_HTTP_NOT_MODIFIED
+        || r->method == NGX_HTTP_HEAD)
+    {
+        ctx->length = 0;
+
+    } else {
+        ctx->length = u->headers_in.content_length_n;
+    }
 
     if (ctx->end_stream) {
+
+        if (ctx->length > 0) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "upstream prematurely closed stream");
+            return NGX_ERROR;
+        }
+
         u->length = 0;
+        ctx->done = 1;
+
+    } else {
+        u->length = 1;
     }
 
     return NGX_OK;
@@ -1881,6 +2210,12 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
 
                 if (ctx->done) {
 
+                    if (ctx->length > 0) {
+                        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                                      "upstream prematurely closed stream");
+                        return NGX_ERROR;
+                    }
+
                     /*
                      * We have finished parsing the response and the
                      * remaining control frames.  If there are unsent
@@ -1898,6 +2233,7 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
                     if (ctx->in == NULL
                         && ctx->output_closed
                         && !ctx->output_blocked
+                        && !ctx->goaway
                         && ctx->state == ngx_http_grpc_st_start)
                     {
                         u->keepalive = 1;
@@ -1972,7 +2308,10 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
                 return NGX_ERROR;
             }
 
-            if (ctx->stream_id && ctx->done) {
+            if (ctx->stream_id && ctx->done
+                && ctx->type != NGX_HTTP_V2_RST_STREAM_FRAME
+                && ctx->type != NGX_HTTP_V2_WINDOW_UPDATE_FRAME)
+            {
                 ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                               "upstream sent frame for closed stream %ui",
                               ctx->stream_id);
@@ -2015,11 +2354,23 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
                 return NGX_ERROR;
             }
 
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                          "upstream rejected request with error %ui",
-                          ctx->error);
+            if (ctx->error || !ctx->done) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "upstream rejected request with error %ui",
+                              ctx->error);
+                return NGX_ERROR;
+            }
 
-            return NGX_ERROR;
+            if (ctx->rst) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "upstream sent frame for closed stream %ui",
+                              ctx->stream_id);
+                return NGX_ERROR;
+            }
+
+            ctx->rst = 1;
+
+            continue;
         }
 
         if (ctx->type == NGX_HTTP_V2_GOAWAY_FRAME) {
@@ -2053,6 +2404,8 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
 
                 return NGX_ERROR;
             }
+
+            ctx->goaway = 1;
 
             continue;
         }
@@ -2286,12 +2639,36 @@ ngx_http_grpc_filter(void *data, ssize_t bytes)
             b->pos = b->last;
             buf->last = b->pos;
 
+            if (ctx->length != -1) {
+
+                if (buf->last - buf->pos > ctx->length) {
+                    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                                  "upstream sent response body larger "
+                                  "than indicated content length");
+                    return NGX_ERROR;
+                }
+
+                ctx->length -= buf->last - buf->pos;
+            }
+
             return NGX_AGAIN;
         }
 
         b->pos += ctx->rest - ctx->padding;
         buf->last = b->pos;
         ctx->rest = ctx->padding;
+
+        if (ctx->length != -1) {
+
+            if (buf->last - buf->pos > ctx->length) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "upstream sent response body larger "
+                              "than indicated content length");
+                return NGX_ERROR;
+            }
+
+            ctx->length -= buf->last - buf->pos;
+        }
 
     done:
 
@@ -2435,6 +2812,7 @@ ngx_http_grpc_parse_header(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
         if (ctx->type == NGX_HTTP_V2_HEADERS_FRAME) {
             ctx->parsing_headers = 1;
             ctx->fragment_state = 0;
+            ctx->header_limit = r->upstream->conf->buffer_size;
 
             min = (ctx->flags & NGX_HTTP_V2_PADDED_FLAG ? 1 : 0)
                   + (ctx->flags & NGX_HTTP_V2_PRIORITY_FLAG ? 5 : 0);
@@ -2630,7 +3008,7 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
     ngx_buf_t *b)
 {
     u_char      ch, *p, *last;
-    size_t      size;
+    size_t      len, size;
     ngx_uint_t  index, size_update;
     enum {
         sw_start = 0,
@@ -2969,6 +3347,14 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
             ctx->name.len = ctx->field_huffman ?
                             ctx->field_length * 8 / 5 : ctx->field_length;
 
+            if (ctx->name.len > ctx->header_limit) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "upstream sent too large http2 "
+                              "header name length: %uz",
+                              ctx->name.len);
+                return NGX_ERROR;
+            }
+
             ctx->name.data = ngx_pnalloc(r->pool, ctx->name.len + 1);
             if (ctx->name.data == NULL) {
                 return NGX_ERROR;
@@ -2995,10 +3381,10 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
             ctx->field_rest -= size;
 
             if (ctx->field_huffman) {
-                if (ngx_http_v2_huff_decode(&ctx->field_state, p, size,
-                                            &ctx->field_end,
-                                            ctx->field_rest == 0,
-                                            r->connection->log)
+                if (ngx_http_huff_decode(&ctx->field_state, p, size,
+                                         &ctx->field_end,
+                                         ctx->field_rest == 0,
+                                         r->connection->log)
                     != NGX_OK)
                 {
                     ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -3078,6 +3464,14 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
             ctx->value.len = ctx->field_huffman ?
                              ctx->field_length * 8 / 5 : ctx->field_length;
 
+            if (ctx->value.len > ctx->header_limit) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              "upstream sent too large http2 "
+                              "header value length: %uz",
+                              ctx->value.len);
+                return NGX_ERROR;
+            }
+
             ctx->value.data = ngx_pnalloc(r->pool, ctx->value.len + 1);
             if (ctx->value.data == NULL) {
                 return NGX_ERROR;
@@ -3104,10 +3498,10 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
             ctx->field_rest -= size;
 
             if (ctx->field_huffman) {
-                if (ngx_http_v2_huff_decode(&ctx->field_state, p, size,
-                                            &ctx->field_end,
-                                            ctx->field_rest == 0,
-                                            r->connection->log)
+                if (ngx_http_huff_decode(&ctx->field_state, p, size,
+                                         &ctx->field_end,
+                                         ctx->field_rest == 0,
+                                         r->connection->log)
                     != NGX_OK)
                 {
                     ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -3167,6 +3561,16 @@ ngx_http_grpc_parse_fragment(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
             }
         }
 
+        len = ctx->name.len + ctx->value.len;
+
+        if (len > ctx->header_limit) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "upstream sent too large http2 header");
+            return NGX_ERROR;
+        }
+
+        ctx->header_limit -= len;
+
         return NGX_OK;
     }
 
@@ -3199,7 +3603,7 @@ ngx_http_grpc_validate_header_name(ngx_http_request_t *r, ngx_str_t *s)
             return NGX_ERROR;
         }
 
-        if (ch == '\0' || ch == CR || ch == LF) {
+        if (ch <= 0x20 || ch == 0x7f) {
             return NGX_ERROR;
         }
     }
@@ -3300,6 +3704,8 @@ ngx_http_grpc_parse_rst_stream(ngx_http_request_t *r, ngx_http_grpc_ctx_t *ctx,
     if (ctx->rest > 0) {
         return NGX_AGAIN;
     }
+
+    ctx->state = ngx_http_grpc_st_start;
 
     return NGX_OK;
 }
@@ -3498,6 +3904,12 @@ ngx_http_grpc_parse_window_update(ngx_http_request_t *r,
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "grpc window update: %ui", ctx->window_update);
+
+    if (ctx->window_update == 0) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "upstream sent zero window update");
+        return NGX_ERROR;
+    }
 
     if (ctx->stream_id) {
 
@@ -4154,25 +4566,23 @@ ngx_http_grpc_create_loc_conf(ngx_conf_t *cf)
      *     conf->upstream.ignore_headers = 0;
      *     conf->upstream.next_upstream = 0;
      *     conf->upstream.hide_headers_hash = { NULL, 0 };
-     *     conf->upstream.ssl_name = NULL;
      *
-     *     conf->headers_source = NULL;
      *     conf->headers.lengths = NULL;
      *     conf->headers.values = NULL;
      *     conf->headers.hash = { NULL, 0 };
      *     conf->host = { 0, NULL };
-     *     conf->host_set = 0;
+     *     conf->host_value = NULL;
      *     conf->ssl = 0;
      *     conf->ssl_protocols = 0;
      *     conf->ssl_ciphers = { 0, NULL };
      *     conf->ssl_trusted_certificate = { 0, NULL };
      *     conf->ssl_crl = { 0, NULL };
-     *     conf->ssl_certificate = { 0, NULL };
-     *     conf->ssl_certificate_key = { 0, NULL };
      */
 
     conf->upstream.local = NGX_CONF_UNSET_PTR;
     conf->upstream.socket_keepalive = NGX_CONF_UNSET;
+    conf->upstream.socket_rcvbuf = NGX_CONF_UNSET_SIZE;
+    conf->upstream.socket_sndbuf = NGX_CONF_UNSET_SIZE;
     conf->upstream.next_upstream_tries = NGX_CONF_UNSET_UINT;
     conf->upstream.connect_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.send_timeout = NGX_CONF_UNSET_MSEC;
@@ -4188,10 +4598,20 @@ ngx_http_grpc_create_loc_conf(ngx_conf_t *cf)
 
 #if (NGX_HTTP_SSL)
     conf->upstream.ssl_session_reuse = NGX_CONF_UNSET;
+    conf->upstream.ssl_name = NGX_CONF_UNSET_PTR;
     conf->upstream.ssl_server_name = NGX_CONF_UNSET;
     conf->upstream.ssl_verify = NGX_CONF_UNSET;
     conf->ssl_verify_depth = NGX_CONF_UNSET_UINT;
-    conf->ssl_passwords = NGX_CONF_UNSET_PTR;
+    conf->upstream.ssl_certificate = NGX_CONF_UNSET_PTR;
+    conf->upstream.ssl_certificate_key = NGX_CONF_UNSET_PTR;
+    conf->upstream.ssl_certificate_cache = NGX_CONF_UNSET_PTR;
+    conf->upstream.ssl_passwords = NGX_CONF_UNSET_PTR;
+    conf->ssl_conf_commands = NGX_CONF_UNSET_PTR;
+
+#if (T_NGX_SSL_NTLS)
+    conf->upstream.tls_method = NULL;
+    conf->upstream.enable_ntls = NULL;
+#endif
 #endif
 
     /* the hardcoded values */
@@ -4207,7 +4627,10 @@ ngx_http_grpc_create_loc_conf(ngx_conf_t *cf)
     conf->upstream.pass_request_body = 1;
     conf->upstream.force_ranges = 0;
     conf->upstream.pass_trailers = 1;
+    conf->upstream.pass_early_hints = 1;
     conf->upstream.preserve_output = 1;
+
+    conf->headers_source = NGX_CONF_UNSET_PTR;
 
     ngx_str_set(&conf->upstream.module, "grpc");
 
@@ -4230,6 +4653,12 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->upstream.socket_keepalive,
                               prev->upstream.socket_keepalive, 0);
+
+    ngx_conf_merge_size_value(conf->upstream.socket_rcvbuf,
+                              prev->upstream.socket_rcvbuf, 0);
+
+    ngx_conf_merge_size_value(conf->upstream.socket_sndbuf,
+                              prev->upstream.socket_sndbuf, 0);
 
     ngx_conf_merge_uint_value(conf->upstream.next_upstream_tries,
                               prev->upstream.next_upstream_tries, 0);
@@ -4270,20 +4699,21 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
 #if (NGX_HTTP_SSL)
 
+    if (ngx_http_grpc_merge_ssl(cf, conf, prev) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
     ngx_conf_merge_value(conf->upstream.ssl_session_reuse,
                               prev->upstream.ssl_session_reuse, 1);
 
     ngx_conf_merge_bitmask_value(conf->ssl_protocols, prev->ssl_protocols,
-                                 (NGX_CONF_BITMASK_SET|NGX_SSL_TLSv1
-                                  |NGX_SSL_TLSv1_1|NGX_SSL_TLSv1_2));
+                              (NGX_CONF_BITMASK_SET|NGX_SSL_DEFAULT_PROTOCOLS));
 
     ngx_conf_merge_str_value(conf->ssl_ciphers, prev->ssl_ciphers,
                              "DEFAULT");
 
-    if (conf->upstream.ssl_name == NULL) {
-        conf->upstream.ssl_name = prev->upstream.ssl_name;
-    }
-
+    ngx_conf_merge_ptr_value(conf->upstream.ssl_name,
+                              prev->upstream.ssl_name, NULL);
     ngx_conf_merge_value(conf->upstream.ssl_server_name,
                               prev->upstream.ssl_server_name, 0);
     ngx_conf_merge_value(conf->upstream.ssl_verify,
@@ -4294,16 +4724,41 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                               prev->ssl_trusted_certificate, "");
     ngx_conf_merge_str_value(conf->ssl_crl, prev->ssl_crl, "");
 
-    ngx_conf_merge_str_value(conf->ssl_certificate,
-                              prev->ssl_certificate, "");
-    ngx_conf_merge_str_value(conf->ssl_certificate_key,
-                              prev->ssl_certificate_key, "");
-    ngx_conf_merge_ptr_value(conf->ssl_passwords, prev->ssl_passwords, NULL);
+    ngx_conf_merge_ptr_value(conf->upstream.ssl_certificate,
+                              prev->upstream.ssl_certificate, NULL);
+    ngx_conf_merge_ptr_value(conf->upstream.ssl_certificate_key,
+                              prev->upstream.ssl_certificate_key, NULL);
+    ngx_conf_merge_ptr_value(conf->upstream.ssl_certificate_cache,
+                              prev->upstream.ssl_certificate_cache, NULL);
+
+    if (ngx_http_upstream_merge_ssl_passwords(cf, &conf->upstream,
+                                              &prev->upstream)
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_conf_merge_ptr_value(conf->ssl_conf_commands,
+                              prev->ssl_conf_commands, NULL);
 
     if (conf->ssl && ngx_http_grpc_set_ssl(cf, conf) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
+#if (T_NGX_SSL_NTLS)
+    if (conf->upstream.enable_ntls == NULL) {
+        conf->upstream.enable_ntls = prev->upstream.enable_ntls;
+    }
+    ngx_conf_merge_str_value(conf->upstream.enc_certificate,
+                             prev->upstream.enc_certificate, "");
+    ngx_conf_merge_str_value(conf->upstream.enc_certificate_key,
+                             prev->upstream.enc_certificate_key, "");
+    ngx_conf_merge_str_value(conf->upstream.sign_certificate,
+                             prev->upstream.sign_certificate, "");
+    ngx_conf_merge_str_value(conf->upstream.sign_certificate_key,
+                             prev->upstream.sign_certificate_key, "");
+    conf->upstream.ssl_ciphers = conf->ssl_ciphers;
+#endif
 #endif
 
     hash.max_size = 512;
@@ -4319,22 +4774,31 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
 
-    if (clcf->noname && conf->upstream.upstream == NULL) {
+    if (clcf->noname
+        && conf->upstream.upstream == NULL && conf->grpc_lengths == NULL)
+    {
         conf->upstream.upstream = prev->upstream.upstream;
         conf->host = prev->host;
+
+        conf->grpc_lengths = prev->grpc_lengths;
+        conf->grpc_values = prev->grpc_values;
+
 #if (NGX_HTTP_SSL)
-        conf->upstream.ssl = prev->upstream.ssl;
+        conf->ssl = prev->ssl;
 #endif
     }
 
-    if (clcf->lmt_excpt && clcf->handler == NULL && conf->upstream.upstream) {
+    if (clcf->lmt_excpt && clcf->handler == NULL
+        && (conf->upstream.upstream || conf->grpc_lengths))
+    {
         clcf->handler = ngx_http_grpc_handler;
     }
 
-    if (conf->headers_source == NULL) {
+    ngx_conf_merge_ptr_value(conf->headers_source, prev->headers_source, NULL);
+
+    if (conf->headers_source == prev->headers_source) {
         conf->headers = prev->headers;
-        conf->headers_source = prev->headers_source;
-        conf->host_set = prev->host_set;
+        conf->host_value = prev->host_value;
     }
 
     rc = ngx_http_grpc_init_headers(cf, conf, &conf->headers,
@@ -4352,7 +4816,7 @@ ngx_http_grpc_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         && conf->headers_source == prev->headers_source)
     {
         prev->headers = conf->headers;
-        prev->host_set = conf->host_set;
+        prev->host_value = conf->host_value;
     }
 
     return NGX_CONF_OK;
@@ -4363,16 +4827,17 @@ static ngx_int_t
 ngx_http_grpc_init_headers(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *conf,
     ngx_http_grpc_headers_t *headers, ngx_keyval_t *default_headers)
 {
-    u_char                       *p;
-    size_t                        size;
-    uintptr_t                    *code;
-    ngx_uint_t                    i;
-    ngx_array_t                   headers_names, headers_merged;
-    ngx_keyval_t                 *src, *s, *h;
-    ngx_hash_key_t               *hk;
-    ngx_hash_init_t               hash;
-    ngx_http_script_compile_t     sc;
-    ngx_http_script_copy_code_t  *copy;
+    u_char                            *p;
+    size_t                             size;
+    uintptr_t                         *code;
+    ngx_uint_t                         i;
+    ngx_array_t                        headers_names, headers_merged;
+    ngx_keyval_t                      *src, *s, *h;
+    ngx_hash_key_t                    *hk;
+    ngx_hash_init_t                    hash;
+    ngx_http_script_compile_t          sc;
+    ngx_http_script_copy_code_t       *copy;
+    ngx_http_compile_complex_value_t   ccv;
 
     if (headers->hash.buckets) {
         return NGX_OK;
@@ -4408,7 +4873,23 @@ ngx_http_grpc_init_headers(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *conf,
             if (src[i].key.len == 4
                 && ngx_strncasecmp(src[i].key.data, (u_char *) "Host", 4) == 0)
             {
-                conf->host_set = 1;
+                conf->host_value = ngx_pcalloc(cf->pool,
+                                             sizeof(ngx_http_complex_value_t));
+                if (conf->host_value == NULL) {
+                    return NGX_ERROR;
+                }
+
+                ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+
+                ccv.cf = cf;
+                ccv.value = &src[i].value;
+                ccv.complex_value = conf->host_value;
+
+                if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+                    return NGX_ERROR;
+                }
+
+                continue;
             }
 
             s = ngx_array_push(&headers_merged);
@@ -4537,17 +5018,53 @@ ngx_http_grpc_pass(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_grpc_loc_conf_t *glcf = conf;
 
-    size_t                     add;
-    ngx_str_t                 *value, *url;
-    ngx_url_t                  u;
-    ngx_http_core_loc_conf_t  *clcf;
+    size_t                      add;
+    ngx_str_t                  *value, *url;
+    ngx_url_t                   u;
+    ngx_uint_t                  n;
+    ngx_http_core_loc_conf_t   *clcf;
+    ngx_http_script_compile_t   sc;
 
-    if (glcf->upstream.upstream) {
+    if (glcf->upstream.upstream || glcf->grpc_lengths) {
         return "is duplicate";
     }
 
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+
+    clcf->handler = ngx_http_grpc_handler;
+
+    if (clcf->name.len && clcf->name.data[clcf->name.len - 1] == '/') {
+        clcf->auto_redirect = 1;
+    }
+
     value = cf->args->elts;
+
     url = &value[1];
+
+    n = ngx_http_script_variables_count(url);
+
+    if (n) {
+
+        ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
+
+        sc.cf = cf;
+        sc.source = url;
+        sc.lengths = &glcf->grpc_lengths;
+        sc.values = &glcf->grpc_values;
+        sc.variables = n;
+        sc.complete_lengths = 1;
+        sc.complete_values = 1;
+
+        if (ngx_http_script_compile(&sc) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
+
+#if (NGX_HTTP_SSL)
+        glcf->ssl = 1;
+#endif
+
+        return NGX_CONF_OK;
+    }
 
     if (ngx_strncasecmp(url->data, (u_char *) "grpc://", 7) == 0) {
         add = 7;
@@ -4593,19 +5110,105 @@ ngx_http_grpc_pass(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         ngx_str_set(&glcf->host, "localhost");
     }
 
-    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-
-    clcf->handler = ngx_http_grpc_handler;
-
-    if (clcf->name.len && clcf->name.data[clcf->name.len - 1] == '/') {
-        clcf->auto_redirect = 1;
-    }
-
     return NGX_CONF_OK;
 }
 
 
 #if (NGX_HTTP_SSL)
+
+static char *
+ngx_http_grpc_ssl_certificate_cache(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_http_grpc_loc_conf_t *plcf = conf;
+
+    time_t       inactive, valid;
+    ngx_str_t   *value, s;
+    ngx_int_t    max;
+    ngx_uint_t   i;
+
+    if (plcf->upstream.ssl_certificate_cache != NGX_CONF_UNSET_PTR) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    max = 0;
+    inactive = 10;
+    valid = 60;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        if (ngx_strncmp(value[i].data, "max=", 4) == 0) {
+
+            max = ngx_atoi(value[i].data + 4, value[i].len - 4);
+            if (max <= 0) {
+                goto failed;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "inactive=", 9) == 0) {
+
+            s.len = value[i].len - 9;
+            s.data = value[i].data + 9;
+
+            inactive = ngx_parse_time(&s, 1);
+            if (inactive == (time_t) NGX_ERROR) {
+                goto failed;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "valid=", 6) == 0) {
+
+            s.len = value[i].len - 6;
+            s.data = value[i].data + 6;
+
+            valid = ngx_parse_time(&s, 1);
+            if (valid == (time_t) NGX_ERROR) {
+                goto failed;
+            }
+
+            continue;
+        }
+
+        if (ngx_strcmp(value[i].data, "off") == 0) {
+
+            plcf->upstream.ssl_certificate_cache = NULL;
+
+            continue;
+        }
+
+    failed:
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid parameter \"%V\"", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (plcf->upstream.ssl_certificate_cache == NULL) {
+        return NGX_CONF_OK;
+    }
+
+    if (max == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "\"grpc_ssl_certificate_cache\" must have "
+                           "the \"max\" parameter");
+        return NGX_CONF_ERROR;
+    }
+
+    plcf->upstream.ssl_certificate_cache = ngx_ssl_cache_init(cf->pool, max,
+                                                              valid, inactive);
+    if (plcf->upstream.ssl_certificate_cache == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
 
 static char *
 ngx_http_grpc_ssl_password_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
@@ -4614,19 +5217,79 @@ ngx_http_grpc_ssl_password_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     ngx_str_t  *value;
 
-    if (glcf->ssl_passwords != NGX_CONF_UNSET_PTR) {
+    if (glcf->upstream.ssl_passwords != NGX_CONF_UNSET_PTR) {
         return "is duplicate";
     }
 
     value = cf->args->elts;
 
-    glcf->ssl_passwords = ngx_ssl_read_password_file(cf, &value[1]);
+    glcf->upstream.ssl_passwords = ngx_ssl_read_password_file(cf, &value[1]);
 
-    if (glcf->ssl_passwords == NULL) {
+    if (glcf->upstream.ssl_passwords == NULL) {
         return NGX_CONF_ERROR;
     }
 
     return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_http_grpc_ssl_conf_command_check(ngx_conf_t *cf, void *post, void *data)
+{
+#ifndef SSL_CONF_FLAG_FILE
+    return "is not supported on this platform";
+#else
+    return NGX_CONF_OK;
+#endif
+}
+
+
+static ngx_int_t
+ngx_http_grpc_merge_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *conf,
+    ngx_http_grpc_loc_conf_t *prev)
+{
+    ngx_uint_t  preserve;
+
+    if (conf->ssl_protocols == 0
+        && conf->ssl_ciphers.data == NULL
+        && conf->upstream.ssl_certificate == NGX_CONF_UNSET_PTR
+        && conf->upstream.ssl_certificate_key == NGX_CONF_UNSET_PTR
+        && conf->upstream.ssl_passwords == NGX_CONF_UNSET_PTR
+        && conf->upstream.ssl_verify == NGX_CONF_UNSET
+        && conf->ssl_verify_depth == NGX_CONF_UNSET_UINT
+        && conf->ssl_trusted_certificate.data == NULL
+        && conf->ssl_crl.data == NULL
+        && conf->upstream.ssl_session_reuse == NGX_CONF_UNSET
+        && conf->ssl_conf_commands == NGX_CONF_UNSET_PTR)
+    {
+        if (prev->upstream.ssl) {
+            conf->upstream.ssl = prev->upstream.ssl;
+            return NGX_OK;
+        }
+
+        preserve = 1;
+
+    } else {
+        preserve = 0;
+    }
+
+    conf->upstream.ssl = ngx_pcalloc(cf->pool, sizeof(ngx_ssl_t));
+    if (conf->upstream.ssl == NULL) {
+        return NGX_ERROR;
+    }
+
+    conf->upstream.ssl->log = cf->log;
+
+    /*
+     * special handling to preserve conf->upstream.ssl
+     * in the "http" section to inherit it to all servers
+     */
+
+    if (preserve) {
+        prev->upstream.ssl = conf->upstream.ssl;
+    }
+
+    return NGX_OK;
 }
 
 
@@ -4635,12 +5298,9 @@ ngx_http_grpc_set_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *glcf)
 {
     ngx_pool_cleanup_t  *cln;
 
-    glcf->upstream.ssl = ngx_pcalloc(cf->pool, sizeof(ngx_ssl_t));
-    if (glcf->upstream.ssl == NULL) {
-        return NGX_ERROR;
+    if (glcf->upstream.ssl->ctx) {
+        return NGX_OK;
     }
-
-    glcf->upstream.ssl->log = cf->log;
 
     if (ngx_ssl_create(glcf->upstream.ssl, glcf->ssl_protocols, NULL)
         != NGX_OK)
@@ -4657,28 +5317,89 @@ ngx_http_grpc_set_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *glcf)
     cln->handler = ngx_ssl_cleanup_ctx;
     cln->data = glcf->upstream.ssl;
 
-    if (glcf->ssl_certificate.len) {
+    if (ngx_ssl_ciphers(cf, glcf->upstream.ssl, &glcf->ssl_ciphers, 0)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
 
-        if (glcf->ssl_certificate_key.len == 0) {
+    if (glcf->upstream.ssl_certificate
+        && glcf->upstream.ssl_certificate->value.len)
+    {
+        if (glcf->upstream.ssl_certificate_key == NULL) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "no \"grpc_ssl_certificate_key\" is defined "
-                          "for certificate \"%V\"", &glcf->ssl_certificate);
+                          "for certificate \"%V\"",
+                          &glcf->upstream.ssl_certificate->value);
             return NGX_ERROR;
         }
 
-        if (ngx_ssl_certificate(cf, glcf->upstream.ssl, &glcf->ssl_certificate,
-                                &glcf->ssl_certificate_key, glcf->ssl_passwords)
+        if (glcf->upstream.ssl_certificate->lengths == NULL
+            && glcf->upstream.ssl_certificate_key->lengths == NULL)
+        {
+#if (T_NGX_SSL_NTLS)
+            if (ngx_ssl_certificate(cf, glcf->upstream.ssl,
+                                    &glcf->upstream.ssl_certificate->value,
+                                    &glcf->upstream.ssl_certificate_key->value,
+                                    glcf->upstream.ssl_passwords,
+                                    SSL_NORMAL_CERT)
+#else
+            if (ngx_ssl_certificate(cf, glcf->upstream.ssl,
+                                    &glcf->upstream.ssl_certificate->value,
+                                    &glcf->upstream.ssl_certificate_key->value,
+                                    glcf->upstream.ssl_passwords)
+#endif
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+        }
+    }
+
+#if (T_NGX_SSL_NTLS)
+    glcf->upstream.tls_method = SSL_CTX_get_ssl_method(glcf->upstream.ssl->ctx);
+    if (glcf->upstream.enc_certificate.len) {
+
+        if (glcf->upstream.enc_certificate_key.len == 0) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "no \"grpc_ssl_enc_certificate_key\" is defined "
+                          "for certificate \"%V\"",
+                          &glcf->upstream.enc_certificate);
+            return NGX_ERROR;
+        }
+
+        if (ngx_ssl_certificate(cf, glcf->upstream.ssl,
+                                &glcf->upstream.enc_certificate,
+                                &glcf->upstream.enc_certificate_key,
+                                glcf->upstream.ssl_passwords,
+                                SSL_ENC_CERT)
             != NGX_OK)
         {
             return NGX_ERROR;
         }
     }
 
-    if (ngx_ssl_ciphers(cf, glcf->upstream.ssl, &glcf->ssl_ciphers, 0)
-        != NGX_OK)
-    {
-        return NGX_ERROR;
+    if (glcf->upstream.sign_certificate.len) {
+
+        if (glcf->upstream.sign_certificate_key.len == 0) {
+            ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
+                          "no \"grpc_ssl_sign_certificate_key\" is defined "
+                          "for certificate \"%V\"",
+                          &glcf->upstream.sign_certificate);
+            return NGX_ERROR;
+        }
+
+        if (ngx_ssl_certificate(cf, glcf->upstream.ssl,
+                                &glcf->upstream.sign_certificate,
+                                &glcf->upstream.sign_certificate_key,
+                                glcf->upstream.ssl_passwords,
+                                SSL_SIGN_CERT)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
     }
+#endif
 
     if (glcf->upstream.ssl_verify) {
         if (glcf->ssl_trusted_certificate.len == 0) {
@@ -4719,6 +5440,12 @@ ngx_http_grpc_set_ssl(ngx_conf_t *cf, ngx_http_grpc_loc_conf_t *glcf)
     }
 
 #endif
+
+    if (ngx_ssl_conf_commands(cf, glcf->upstream.ssl, glcf->ssl_conf_commands)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
 
     return NGX_OK;
 }

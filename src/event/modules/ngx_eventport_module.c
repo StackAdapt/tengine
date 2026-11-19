@@ -403,7 +403,7 @@ ngx_eventport_del_event(ngx_event_t *ev, ngx_int_t event, ngx_uint_t flags)
             return NGX_ERROR;
         }
 
-    } else {
+    } else if (ev->active) {
         ngx_log_debug1(NGX_LOG_DEBUG_EVENT, ev->log, 0,
                        "eventport del event: fd:%d", c->fd);
 
@@ -563,6 +563,7 @@ ngx_eventport_process_events(ngx_cycle_t *cycle, ngx_msec_t timer,
 
             if (revents & POLLIN) {
                 rev->ready = 1;
+                rev->available = -1;
 
                 if (flags & NGX_POST_EVENTS) {
                     queue = rev->accept ? &ngx_posted_accept_events

@@ -20,6 +20,7 @@ typedef int               ngx_err_t;
 #define NGX_ENOPATH       ENOENT
 #define NGX_ESRCH         ESRCH
 #define NGX_EINTR         EINTR
+#define NGX_EIO           EIO
 #define NGX_ECHILD        ECHILD
 #define NGX_ENOMEM        ENOMEM
 #define NGX_EACCES        EACCES
@@ -54,6 +55,7 @@ typedef int               ngx_err_t;
 #define NGX_ENOMOREFILES  0
 #define NGX_ELOOP         ELOOP
 #define NGX_EBADF         EBADF
+#define NGX_EMSGSIZE      EMSGSIZE
 
 #if (NGX_HAVE_OPENAT)
 #define NGX_EMLINK        EMLINK

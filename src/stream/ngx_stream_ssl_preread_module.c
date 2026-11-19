@@ -33,6 +33,8 @@ typedef struct {
 static ngx_int_t ngx_stream_ssl_preread_handler(ngx_stream_session_t *s);
 static ngx_int_t ngx_stream_ssl_preread_parse_record(
     ngx_stream_ssl_preread_ctx_t *ctx, u_char *pos, u_char *last);
+static ngx_int_t ngx_stream_ssl_preread_servername(ngx_stream_session_t *s,
+    ngx_str_t *servername);
 static ngx_int_t ngx_stream_ssl_preread_protocol_variable(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_ssl_preread_server_name_variable(
@@ -187,6 +189,10 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
             return NGX_DECLINED;
         }
 
+        if (rc == NGX_OK) {
+            return ngx_stream_ssl_preread_servername(s, &ctx->host);
+        }
+
         if (rc != NGX_AGAIN) {
             return rc;
         }
@@ -218,6 +224,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         sw_cs,              /* cipher_suites */
         sw_cm_len,          /* compression_methods length */
         sw_cm,              /* compression_methods */
+        sw_ext_len,         /* extensions length */
         sw_ext,             /* extension */
         sw_ext_header,      /* extension_type, extension_data length */
         sw_sni_len,         /* SNI length */
@@ -324,10 +331,19 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
                 return NGX_OK;
             }
 
-            state = sw_ext;
+            state = sw_ext_len;
             dst = p;
             size = 2;
             break;
+
+        case sw_ext_len:
+            if (left != (size_t) (p[0] << 8) + p[1]) {
+                ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                               "ssl preread: extensions length error");
+                return NGX_DECLINED;
+            }
+
+            /* fall through */
 
         case sw_ext:
             if (left == 0) {
@@ -340,16 +356,32 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_ext_header:
-            if (p[0] == 0 && p[1] == 0 && ctx->host.data == NULL) {
+            ext = (p[2] << 8) + p[3];
+
+            if (p[0] == 0 && p[1] == 0) {
                 /* SNI extension */
+
+                if (ctx->host.data != NULL) {
+                    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                   "ssl preread: duplicate SNI");
+                    return NGX_DECLINED;
+                }
+
                 state = sw_sni_len;
                 dst = p;
                 size = 2;
                 break;
             }
 
-            if (p[0] == 0 && p[1] == 16 && ctx->alpn.data == NULL) {
+            if (p[0] == 0 && p[1] == 16) {
                 /* ALPN extension */
+
+                if (ctx->alpn.data != NULL) {
+                    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                   "ssl preread: duplicate ALPN");
+                    return NGX_DECLINED;
+                }
+
                 state = sw_alpn_len;
                 dst = p;
                 size = 2;
@@ -366,11 +398,17 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
 
             state = sw_ext;
             dst = NULL;
-            size = (p[2] << 8) + p[3];
+            size = ext;
             break;
 
         case sw_sni_len:
-            ext = (p[0] << 8) + p[1];
+            if (ext < 5 || ext != 2 + (size_t) (p[0] << 8) + p[1]) {
+                ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                               "ssl preread: SNI format error");
+                return NGX_DECLINED;
+            }
+            ext -= 2;
+
             state = sw_sni_host_head;
             dst = p;
             size = 3;
@@ -404,16 +442,18 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_sni_host:
             ctx->host.len = (p[1] << 8) + p[2];
 
-            ngx_log_debug1(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
-                           "ssl preread: SNI hostname \"%V\"", &ctx->host);
-
             state = sw_ext;
             dst = NULL;
             size = ext;
             break;
 
         case sw_alpn_len:
-            ext = (p[0] << 8) + p[1];
+            if (ext < 4 || ext != 2 + (size_t) (p[0] << 8) + p[1]) {
+                ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                               "ssl preread: ALPN format error");
+                return NGX_DECLINED;
+            }
+            ext -= 2;
 
             ctx->alpn.data = ngx_pnalloc(ctx->pool, ext);
             if (ctx->alpn.data == NULL) {
@@ -466,6 +506,14 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_supver_len:
+            size = p[0];
+
+            if (ext < 3 || ext != 1 + size) {
+                ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                               "ssl preread: supported_versions format error");
+                return NGX_DECLINED;
+            }
+
             ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                            "ssl preread: supported_versions");
 
@@ -475,7 +523,6 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
 
             state = sw_ext;
             dst = NULL;
-            size = p[0];
             break;
         }
 
@@ -493,6 +540,54 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
     ctx->dst = dst;
 
     return NGX_AGAIN;
+}
+
+
+static ngx_int_t
+ngx_stream_ssl_preread_servername(ngx_stream_session_t *s,
+    ngx_str_t *servername)
+{
+    ngx_int_t                    rc;
+    ngx_str_t                    host;
+    ngx_connection_t            *c;
+    ngx_stream_core_srv_conf_t  *cscf;
+
+    c = s->connection;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                   "SSL preread server name: \"%V\"", servername);
+
+    if (servername->len == 0) {
+        return NGX_OK;
+    }
+
+    host = *servername;
+
+    rc = ngx_stream_validate_host(&host, c->pool, 0);
+
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    if (rc == NGX_DECLINED) {
+        return NGX_OK;
+    }
+
+    rc = ngx_stream_find_virtual_server(s, &host, &cscf);
+
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    if (rc == NGX_DECLINED) {
+        return NGX_OK;
+    }
+
+    s->srv_conf = cscf->ctx->srv_conf;
+
+    ngx_set_connection_log(c, cscf->error_log);
+
+    return NGX_OK;
 }
 
 

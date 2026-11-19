@@ -25,7 +25,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2 proxy/);
+my $t = Test::Nginx->new()->has(qw/http http_v2 proxy/)->plan(49);
 
 $t->write_file_expand('nginx.conf', <<'EOF');
 
@@ -40,9 +40,11 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         listen       127.0.0.1:8082;
         server_name  localhost;
+
+        http2 on;
 
         location / {
             proxy_request_buffering off;
@@ -66,7 +68,6 @@ http {
 EOF
 
 $t->run();
-$t->plan(49);
 
 ###############################################################################
 
@@ -240,6 +241,8 @@ sub get_body {
 			$got += $chunked ? hex $_ : $_ for $chunked
 				? $body =~ /(\w+)\x0d\x0a?\w+\x0d\x0a?/g
 				: length($body);
+			next if $chunked && !$extra{body_more}
+				&& $buf !~ /^0\x0d\x0a?/m;
 			last if $got >= $len;
 		}
 

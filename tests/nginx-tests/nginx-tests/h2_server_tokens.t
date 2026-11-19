@@ -23,7 +23,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2 rewrite/)
+my $t = Test::Nginx->new()->has(qw/http http_v2 rewrite/)->plan(12)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -37,8 +37,10 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         server_name  localhost;
+
+        http2 on;
 
         location /200 {
             return 200;
@@ -88,25 +90,25 @@ http {
 
 EOF
 
-$t->run()->plan(12);
+$t->run();
 
 ###############################################################################
 
-my $re = qr/Tengine\/\d+\.\d+\.\d+/;
+my $re = qr/nginx\/\d+\.\d+\.\d+/;
 
 like(header_server('/200'), qr/^$re$/, 'http2 tokens default 200');
 like(header_server('/404'), qr/^$re$/, 'http2 tokens default 404');
 like(body('/404'), qr/$re/, 'http2 tokens default 404 body');
 
-is(header_server('/off/200'), 'Tengine', 'http2 tokens off 200');
-is(header_server('/off/404'), 'Tengine', 'http2 tokens off 404');
-like(body('/off/404'), qr/Tengine(?!\/)/, 'http2 tokens off 404 body');
+is(header_server('/off/200'), 'nginx', 'http2 tokens off 200');
+is(header_server('/off/404'), 'nginx', 'http2 tokens off 404');
+like(body('/off/404'), qr/nginx(?!\/)/, 'http2 tokens off 404 body');
 
 like(header_server('/on/200'), qr/^$re$/, 'http2 tokens on 200');
 like(header_server('/on/404'), qr/^$re$/, 'http2 tokens on 404');
 like(body('/on/404'), $re, 'http2 tokens on 404 body');
 
-$re = qr/$re \Q($1)\E/ if $t->{_configure_args} =~ /--build=(\S+)/;
+$re = qr/$re \(.*\)/ if $t->has_module('--build=');
 
 like(header_server('/b/200'), qr/^$re$/, 'http2 tokens build 200');
 like(header_server('/b/404'), qr/^$re$/, 'http2 tokens build 404');

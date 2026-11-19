@@ -59,7 +59,8 @@ typedef struct {
     unsigned             done:1;
     unsigned             nomem:1;
     unsigned             buffering:1;
-    unsigned             intel:1;
+    unsigned             zlib_ng:1;
+    unsigned             state_allocated:1;
 
     size_t               zin;
     size_t               zout;
@@ -225,7 +226,7 @@ static ngx_str_t  ngx_http_gzip_ratio = ngx_string("gzip_ratio");
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
 
-static ngx_uint_t  ngx_http_gzip_assume_intel;
+static ngx_uint_t  ngx_http_gzip_assume_zlib_ng;
 
 
 static ngx_int_t
@@ -292,6 +293,7 @@ ngx_http_gzip_header_filter(ngx_http_request_t *r)
     }
 
     h->hash = 1;
+    h->next = NULL;
     ngx_str_set(&h->key, "Content-Encoding");
     ngx_str_set(&h->value, "gzip");
     r->headers_out.content_encoding = h;
@@ -518,18 +520,24 @@ ngx_http_gzip_filter_memory(ngx_http_request_t *r, ngx_http_gzip_ctx_t *ctx)
      * 8K is for zlib deflate_state, it takes
      *  *) 5816 bytes on i386 and sparc64 (32-bit mode)
      *  *) 5920 bytes on amd64 and sparc64
+     *
+     * A zlib variant from Intel (https://github.com/jtkukunas/zlib)
+     * uses additional 16-byte padding in one of window-sized buffers.
      */
 
-    if (!ngx_http_gzip_assume_intel) {
-        ctx->allocated = 8192 + (1 << (wbits + 2)) + (1 << (memlevel + 9));
+    if (!ngx_http_gzip_assume_zlib_ng) {
+        ctx->allocated = 8192 + 16 + (1 << (wbits + 2))
+                         + (1 << (memlevel + 9));
 
     } else {
         /*
-         * A zlib variant from Intel, https://github.com/jtkukunas/zlib.
-         * It can force window bits to 13 for fast compression level,
-         * on processors with SSE 4.2 it uses 64K hash instead of scaling
-         * it from the specified memory level, and also introduces
-         * 16-byte padding in one out of the two window-sized buffers.
+         * Another zlib variant, https://github.com/zlib-ng/zlib-ng.
+         * It used to force window bits to 13 for fast compression level,
+         * used (64 + sizeof(void*)) additional space on all allocations
+         * for alignment and 16-byte padding in one of window-sized buffers,
+         * uses a single allocation with up to 200 bytes for alignment and
+         * internal pointers, 5/4 times more memory for the pending buffer,
+         * and 128K hash.
          */
 
         if (conf->level == 1) {
@@ -537,9 +545,9 @@ ngx_http_gzip_filter_memory(ngx_http_request_t *r, ngx_http_gzip_ctx_t *ctx)
         }
 
         ctx->allocated = 8192 + 16 + (1 << (wbits + 2))
-                         + (1 << (ngx_max(memlevel, 8) + 8))
-                         + (1 << (memlevel + 8));
-        ctx->intel = 1;
+                         + 131072 + (5 << (memlevel + 6))
+                         + 4 * (64 + sizeof(void*));
+        ctx->zlib_ng = 1;
     }
 }
 
@@ -940,12 +948,15 @@ ngx_http_gzip_filter_alloc(void *opaque, u_int items, u_int size)
 
     alloc = items * size;
 
-    if (items == 1 && alloc % 512 != 0 && alloc < 8192) {
-
+    if (items == 1 && alloc % 512 != 0 && alloc < 8192
+        && !ctx->state_allocated)
+    {
         /*
          * The zlib deflate_state allocation, it takes about 6K,
          * we allocate 8K.  Other allocations are divisible by 512.
          */
+
+        ctx->state_allocated = 1;
 
         alloc = 8192;
     }
@@ -962,13 +973,13 @@ ngx_http_gzip_filter_alloc(void *opaque, u_int items, u_int size)
         return p;
     }
 
-    if (ctx->intel) {
+    if (ctx->zlib_ng) {
         ngx_log_error(NGX_LOG_ALERT, ctx->request->connection->log, 0,
                       "gzip filter failed to use preallocated memory: "
                       "%ud of %ui", items * size, ctx->allocated);
 
     } else {
-        ngx_http_gzip_assume_intel = 1;
+        ngx_http_gzip_assume_zlib_ng = 1;
     }
 
     p = ngx_palloc(ctx->request->pool, items * size);
@@ -993,10 +1004,14 @@ static void
 ngx_http_gzip_filter_free_copy_buf(ngx_http_request_t *r,
     ngx_http_gzip_ctx_t *ctx)
 {
-    ngx_chain_t  *cl;
+    ngx_chain_t  *cl, *ln;
 
-    for (cl = ctx->copied; cl; cl = cl->next) {
-        ngx_pfree(r->pool, cl->buf->start);
+    for (cl = ctx->copied; cl; /* void */) {
+        ln = cl;
+        cl = cl->next;
+
+        ngx_pfree(r->pool, ln->buf->start);
+        ngx_free_chain(r->pool, ln);
     }
 
     ctx->copied = NULL;
@@ -1123,7 +1138,7 @@ ngx_http_gzip_merge_conf(ngx_conf_t *cf, void *parent, void *child)
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
                              ngx_http_html_default_types)
-        != NGX_OK)
+        != NGX_CONF_OK)
     {
         return NGX_CONF_ERROR;
     }

@@ -2,7 +2,7 @@ ngx_http_dubbo_module
 =================
 
 该模块提供对后端Dubbo服务体系对接的支持。（Tengine 2.3.2版本之后）
-[Apache Dubbo™](http://dubbo.apache.org) 是一款高性能Java RPC框架。最初由Alibaba开源，经过长期发展和演进，目前已经成为业界主流微服务框架之一。
+[Apache Dubbo™](https://dubbo.apache.org) 是一款高性能Java RPC框架。最初由Alibaba开源，经过长期发展和演进，目前已经成为业界主流微服务框架之一。
 
 在Dubbo服务框架中包含Consumer（client）和Provider（Server）两个角色。该模块支持Tengine作为网关代理，前端接收HTTP/HTTPS/HTTP2等请求，后端作为Dubbo的Consumer调用Dubbo的Provider服务（业务）。
 
@@ -100,10 +100,12 @@ Context: `location, if in location`
 
 该指令用于配置使用Dubbo协议，代理到后端upstream 
 
-*service_name*: Dubbo provider发布的服务名
-*service_version*: Dubbo provider发布的服务版本号
-*method*: Dubbo provider发布的服务方法
-*upstream_name*: 后端upstream名称
+* *service_name*: Dubbo provider发布的服务名
+* *service_version*: Dubbo provider发布的服务版本号
+* *method*: Dubbo provider发布的服务方法
+* *upstream_name*: 后端upstream名称
+
+`service_name`、`service_version`、`method` 支持使用变量。
 
 ```
 # 代理到dubbo_backend这个upstream
@@ -111,7 +113,12 @@ upstream dubbo_backend {
     multi 1;
     server 127.0.0.1:20880;
 }
-dubbo_pass org.apache.dubbo.demo.DemoService 0.0.0 http_dubbo_nginx dubbo_backend;
+
+set $dubbo_service_name "org.apache.dubbo.demo.DemoService";
+set $dubbo_service_name "0.0.0";
+set $dubbo_service_name "http_dubbo_nginx";
+
+dubbo_pass $dubbo_service_name $dubbo_service_version $dubbo_method dubbo_backend;
 ```
 
 注意：

@@ -17,6 +17,9 @@ typedef struct {
 
 typedef struct {
     ngx_uint_t                              two;
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    ngx_uint_t                              config;
+#endif
     ngx_stream_upstream_random_range_t     *ranges;
 } ngx_stream_upstream_random_srv_conf_t;
 
@@ -125,6 +128,11 @@ ngx_stream_upstream_update_random(ngx_pool_t *pool,
 
     rcf = ngx_stream_conf_upstream_srv_conf(us,
                                             ngx_stream_upstream_random_module);
+    if (rcf->ranges) {
+        ngx_free(rcf->ranges);
+        rcf->ranges = NULL;
+    }
+
     peers = us->peer.data;
 
     size = peers->number * sizeof(ngx_stream_upstream_random_range_t);
@@ -186,11 +194,15 @@ ngx_stream_upstream_init_random_peer(ngx_stream_session_t *s,
     ngx_stream_upstream_rr_peers_rlock(rp->rrp.peers);
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
-    if (rp->rrp.peers->shpool && rcf->ranges == NULL) {
+    if (rp->rrp.peers->config
+        && (rcf->ranges == NULL || rcf->config != *rp->rrp.peers->config))
+    {
         if (ngx_stream_upstream_update_random(NULL, us) != NGX_OK) {
             ngx_stream_upstream_rr_peers_unlock(rp->rrp.peers);
             return NGX_ERROR;
         }
+
+        rcf->config = *rp->rrp.peers->config;
     }
 #endif
 
@@ -220,10 +232,17 @@ ngx_stream_upstream_get_random_peer(ngx_peer_connection_t *pc, void *data)
 
     ngx_stream_upstream_rr_peers_rlock(peers);
 
-    if (rp->tries > 20 || peers->single) {
+    if (rp->tries > 20 || peers->number < 2) {
         ngx_stream_upstream_rr_peers_unlock(peers);
         return ngx_stream_upstream_get_round_robin_peer(pc, rrp);
     }
+
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    if (peers->config && rrp->config != *peers->config) {
+        ngx_stream_upstream_rr_peers_unlock(peers);
+        return ngx_stream_upstream_get_round_robin_peer(pc, rrp);
+    }
+#endif
 
     pc->cached = 0;
     pc->connection = NULL;
@@ -250,6 +269,13 @@ ngx_stream_upstream_get_random_peer(ngx_peer_connection_t *pc, void *data)
             goto next;
         }
 
+#if (NGX_STREAM_UPSTREAM_CHECK)
+        if (ngx_stream_upstream_check_peer_down(peer->check_index)) {
+            ngx_stream_upstream_rr_peer_unlock(peers, peer);
+            goto next;
+        }
+#endif
+
         if (peer->max_fails
             && peer->fails >= peer->max_fails
             && now - peer->checked <= peer->fail_timeout)
@@ -274,6 +300,7 @@ ngx_stream_upstream_get_random_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     rrp->current = peer;
+    ngx_stream_upstream_rr_peer_ref(peers, peer);
 
     if (now - peer->checked > peer->fail_timeout) {
         peer->checked = now;
@@ -314,10 +341,17 @@ ngx_stream_upstream_get_random2_peer(ngx_peer_connection_t *pc, void *data)
 
     ngx_stream_upstream_rr_peers_wlock(peers);
 
-    if (rp->tries > 20 || peers->single) {
+    if (rp->tries > 20 || peers->number < 2) {
         ngx_stream_upstream_rr_peers_unlock(peers);
         return ngx_stream_upstream_get_round_robin_peer(pc, rrp);
     }
+
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    if (peers->config && rrp->config != *peers->config) {
+        ngx_stream_upstream_rr_peers_unlock(peers);
+        return ngx_stream_upstream_get_round_robin_peer(pc, rrp);
+    }
+#endif
 
     pc->cached = 0;
     pc->connection = NULL;
@@ -350,6 +384,12 @@ ngx_stream_upstream_get_random2_peer(ngx_peer_connection_t *pc, void *data)
         if (peer->down) {
             goto next;
         }
+
+#if (NGX_STREAM_UPSTREAM_CHECK)
+        if (ngx_stream_upstream_check_peer_down(peer->check_index)) {
+            goto next;
+        }
+#endif
 
         if (peer->max_fails
             && peer->fails >= peer->max_fails
@@ -384,6 +424,7 @@ ngx_stream_upstream_get_random2_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     rrp->current = peer;
+    ngx_stream_upstream_rr_peer_ref(peers, peer);
 
     if (now - peer->checked > peer->fail_timeout) {
         peer->checked = now;
@@ -467,6 +508,7 @@ ngx_stream_upstream_random(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     uscf->peer.init_upstream = ngx_stream_upstream_init_random;
 
     uscf->flags = NGX_STREAM_UPSTREAM_CREATE
+                  |NGX_STREAM_UPSTREAM_MODIFY
                   |NGX_STREAM_UPSTREAM_WEIGHT
                   |NGX_STREAM_UPSTREAM_MAX_CONNS
                   |NGX_STREAM_UPSTREAM_MAX_FAILS

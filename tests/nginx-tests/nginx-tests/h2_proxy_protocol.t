@@ -25,7 +25,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2 realip/)->plan(4)
+my $t = Test::Nginx->new()->has(qw/http http_v2 realip/)->plan(3)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -39,8 +39,10 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080 proxy_protocol http2;
+        listen       127.0.0.1:8080 proxy_protocol;
         server_name  localhost;
+
+        http2 on;
 
         location /pp {
             set_real_ip_from 127.0.0.1/32;
@@ -70,11 +72,6 @@ is($frame->{headers}->{'x-pp'}, '192.0.2.1', 'PROXY remote addr');
 # invalid PROXY protocol string
 
 $proxy = 'BOGUS TCP4 192.0.2.1 192.0.2.2 1234 5678' . CRLF;
-$s = Test::Nginx::HTTP2->new(port(8080), preface => $proxy, pure => 1);
-$frames = $s->read(all => [{ type => 'GOAWAY' }]);
-
-($frame) = grep { $_->{type} eq "GOAWAY" } @$frames;
-ok($frame, 'invalid PROXY - GOAWAY frame');
-is($frame->{code}, 1, 'invalid PROXY - error code');
+ok(!http($proxy), 'PROXY invalid protocol');
 
 ###############################################################################

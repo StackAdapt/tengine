@@ -1,5 +1,7 @@
 #!/usr/bin/perl
 
+# Copyright (C) 2013 Alibaba Group Holding Limited
+
 ###############################################################################
 
 use warnings;
@@ -26,18 +28,12 @@ plan(skip_all => 'unsupported os') if (!(-e "/usr/bin/uptime" || -e "/usr/bin/fr
 
 my $t = Test::Nginx->new()->has(qw/http sysguard/)->plan(26);
 
-$t->set_dso("ngx_http_fastcgi_module", "ngx_http_fastcgi_module.so");
-$t->set_dso("ngx_http_uwsgi_module", "ngx_http_uwsgi_module.so");
-$t->set_dso("ngx_http_scgi_module", "ngx_http_scgi_module.so");
-
 my $content = <<'EOF';
 
 %%TEST_GLOBALS%%
 
 master_process off;
 daemon         off;
-
-%%TEST_GLOBALS_DSO%%
 
 events {
 }

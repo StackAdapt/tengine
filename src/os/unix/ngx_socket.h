@@ -13,6 +13,8 @@
 
 
 #define NGX_WRITE_SHUTDOWN SHUT_WR
+#define NGX_READ_SHUTDOWN  SHUT_RD
+#define NGX_RDWR_SHUTDOWN  SHUT_RDWR
 
 typedef int  ngx_socket_t;
 
@@ -35,6 +37,13 @@ int ngx_blocking(ngx_socket_t s);
 
 #define ngx_blocking(s)     fcntl(s, F_SETFL, fcntl(s, F_GETFL) & ~O_NONBLOCK)
 #define ngx_blocking_n      "fcntl(!O_NONBLOCK)"
+
+#endif
+
+#if (NGX_HAVE_FIONREAD)
+
+#define ngx_socket_nread(s, n)  ioctl(s, FIONREAD, n)
+#define ngx_socket_nread_n      "ioctl(FIONREAD)"
 
 #endif
 

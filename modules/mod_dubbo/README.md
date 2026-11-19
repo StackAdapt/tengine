@@ -10,13 +10,13 @@ git clone https://github.com/alibaba/tengine.git
 ```
 cd ./tengine
 
-wget https://ftp.pcre.org/pub/pcre/pcre-8.43.tar.gz
+wget https://downloads.sourceforge.net/project/pcre/pcre/8.43/pcre-8.43.tar.gz
 tar xvf pcre-8.43.tar.gz
 
 wget https://www.openssl.org/source/openssl-1.0.2s.tar.gz
 tar xvf openssl-1.0.2s.tar.gz
 
-wget http://www.zlib.net/zlib-1.2.11.tar.gz
+wget https://www.zlib.net/fossils/zlib-1.2.11.tar.gz
 tar xvf zlib-1.2.11.tar.gz
 ```
 
@@ -35,7 +35,7 @@ sudo yum install gcc-c++
 
 ### Run Tengine
 
-modify tengine config file ```/usr/local/nginx/conf/nginx.conf``` to 
+modify tengine config file ```/usr/local/tengine/conf/tengine.conf``` to 
 
 ```
 worker_processes  1;
@@ -57,12 +57,16 @@ http {
         
         #pass the Dubbo to Dubbo Provider server listening on 127.0.0.1:20880
         location / {
+            set $dubbo_service_name "org.apache.dubbo.samples.tengine.DemoService";
+            set $dubbo_service_name "0.0.0";
+            set $dubbo_service_name "tengineDubbo";
+
             dubbo_pass_all_headers on;
             dubbo_pass_set args $args;
             dubbo_pass_set uri $uri;
             dubbo_pass_set method $request_method;
         
-            dubbo_pass org.apache.dubbo.samples.tengine.DemoService 0.0.0 tengineDubbo dubbo_backend;
+            dubbo_pass $dubbo_service_name $dubbo_service_version $dubbo_method dubbo_backend;
         }
     }
 
@@ -77,15 +81,15 @@ http {
 ### Start Tengine
 
 ```
-/usr/local/nginx/sbin/nginx
+/usr/local/tengine/sbin/tengine
 ```
 
 Other Commond (no need execute usual)
 ```
 #restart
-/usr/local/nginx/sbin/nginx -s reload
+/usr/local/tengine/sbin/tengine -s reload
 #stop
-/usr/local/nginx/sbin/nginx -s stop
+/usr/local/tengine/sbin/tengine -s stop
 ```
 
 ### More document
@@ -115,7 +119,7 @@ sudo yum install maven
 
 #or
 
-wget http://repos.fedorapeople.org/repos/dchen/apache-maven/epel-apache-maven.repo -O /etc/yum.repos.d/epel-apache-maven.repo
+wget https://repos.fedorapeople.org/repos/dchen/apache-maven/epel-apache-maven.repo -O /etc/yum.repos.d/epel-apache-maven.repo
 sudo yum -y install apache-maven
 
 

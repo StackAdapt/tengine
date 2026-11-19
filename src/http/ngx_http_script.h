@@ -17,6 +17,7 @@
 typedef struct {
     u_char                     *ip;
     u_char                     *pos;
+    u_char                     *end;
     ngx_http_variable_value_t  *sp;
 
     ngx_str_t                   buf;
@@ -201,6 +202,11 @@ typedef struct {
 
 typedef struct {
     ngx_http_script_code_pt     code;
+} ngx_http_script_complex_value_end_code_t;
+
+
+typedef struct {
+    ngx_http_script_code_pt     code;
     uintptr_t                   value;
     uintptr_t                   text_len;
     uintptr_t                   text_data;
@@ -215,6 +221,8 @@ size_t ngx_http_complex_value_size(ngx_http_request_t *r,
     ngx_http_complex_value_t *val, size_t default_value);
 ngx_int_t ngx_http_compile_complex_value(ngx_http_compile_complex_value_t *ccv);
 char *ngx_http_set_complex_value_slot(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+char *ngx_http_set_complex_value_zero_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 char *ngx_http_set_complex_value_size_slot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -237,6 +245,9 @@ void ngx_http_script_flush_no_cacheable_variables(ngx_http_request_t *r,
 void *ngx_http_script_start_code(ngx_pool_t *pool, ngx_array_t **codes,
     size_t size);
 void *ngx_http_script_add_code(ngx_array_t *codes, size_t size, void *code);
+
+ngx_int_t ngx_http_script_check_length(ngx_http_script_engine_t *e,
+    size_t len);
 
 size_t ngx_http_script_copy_len_code(ngx_http_script_engine_t *e);
 void ngx_http_script_copy_code(ngx_http_script_engine_t *e);
@@ -263,6 +274,7 @@ void ngx_http_script_less_or_equal_code(ngx_http_script_engine_t *e);
 void ngx_http_script_not_equal_code(ngx_http_script_engine_t *e);
 void ngx_http_script_file_code(ngx_http_script_engine_t *e);
 void ngx_http_script_complex_value_code(ngx_http_script_engine_t *e);
+void ngx_http_script_complex_value_end_code(ngx_http_script_engine_t *e);
 void ngx_http_script_value_code(ngx_http_script_engine_t *e);
 void ngx_http_script_set_var_code(ngx_http_script_engine_t *e);
 void ngx_http_script_var_set_handler_code(ngx_http_script_engine_t *e);

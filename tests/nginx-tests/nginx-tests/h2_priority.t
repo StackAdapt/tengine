@@ -23,7 +23,7 @@ use Test::Nginx::HTTP2;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-my $t = Test::Nginx->new()->has(qw/http http_v2/)->plan(20)
+my $t = Test::Nginx->new()->has(qw/http http_v2/)->plan(22)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -36,8 +36,10 @@ events {
 http {
     %%TEST_GLOBALS_HTTP%%
 
+    http2 on;
+
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         server_name  localhost;
     }
 }
@@ -54,6 +56,33 @@ $t->write_file('t1.html',
 $t->write_file('t2.html', 'SEE-THIS');
 
 ###############################################################################
+
+# 6.3.  PRIORITY
+#   A PRIORITY frame with a length other than 5 octets MUST be treated as
+#   a stream error of type FRAME_SIZE_ERROR.
+# Instead, we respond with a connection error.  Framing is checked whether
+# or not the contents are acted upon.
+
+my $s = Test::Nginx::HTTP2->new();
+$s->raw_write(pack("x2C2xNNC", 4, 0x2, 1, 0, 16));
+my $frames = $s->read(all => [{ type => 'GOAWAY' }]);
+my ($frame) = grep { $_->{type} eq 'GOAWAY' } @$frames;
+
+is($frame->{code}, 6, 'PRIORITY length - FRAME_SIZE_ERROR');
+
+$s = Test::Nginx::HTTP2->new();
+$s->h2_priority(16, 0, 1);
+$frames = $s->read(all => [{ type => 'GOAWAY' }]);
+($frame) = grep { $_->{type} eq 'GOAWAY' } @$frames;
+
+is($frame->{code}, 1, 'PRIORITY stream 0 - PROTOCOL_ERROR');
+
+$s = Test::Nginx::HTTP2->new(undef, pure => 1);
+$frames = $s->read(all => [ { type => 'SETTINGS'} ]);
+($frame) = grep { $_->{type} eq 'SETTINGS' } @$frames;
+
+SKIP: {
+skip 'RFC 7540 priority removed', 20 if $frame->{9};
 
 # stream muliplexing + PRIORITY frames
 
@@ -206,16 +235,17 @@ is($sids, "$sid $sid2", 'dependency - PRIORITY 2');
 # 5.3.1.  Stream Dependencies
 #   A stream cannot depend on itself.  An endpoint MUST treat this as a
 #   stream error of type PROTOCOL_ERROR.
+# Instead, we respond with a connection error of type PROTOCOL_ERROR.
 
 $s = Test::Nginx::HTTP2->new();
 $sid = $s->new_stream();
 $s->read(all => [{ sid => $sid, fin => 1 }]);
 
 $s->h2_priority(0, $sid, $sid);
-$frames = $s->read(all => [{ type => 'RST_STREAM' }]);
+$frames = $s->read(all => [{ type => 'GOAWAY' }]);
 
-my ($frame) = grep { $_->{type} eq "RST_STREAM" } @$frames;
-is($frame->{sid}, $sid, 'dependency - PRIORITY self - RST_STREAM');
+my ($frame) = grep { $_->{type} eq "GOAWAY" } @$frames;
+is($frame->{last_sid}, $sid, 'dependency - PRIORITY self - GOAWAY');
 is($frame->{code}, 1, 'dependency - PRIORITY self - PROTOCOL_ERROR');
 
 # HEADERS PRIORITY flag, reprioritize prior PRIORITY frame records
@@ -274,10 +304,10 @@ is($sids, "$sid $sid2", 'dependency - HEADERS PRIORITY 2');
 
 $s = Test::Nginx::HTTP2->new();
 $sid = $s->new_stream({ dep => 1 });
-$frames = $s->read(all => [{ type => 'RST_STREAM' }]);
+$frames = $s->read(all => [{ type => 'GOAWAY' }]);
 
-($frame) = grep { $_->{type} eq "RST_STREAM" } @$frames;
-is($frame->{sid}, $sid, 'dependency - HEADERS self - RST_STREAM');
+($frame) = grep { $_->{type} eq "GOAWAY" } @$frames;
+is($frame->{last_sid}, 0, 'dependency - HEADERS self - GOAWAY');
 is($frame->{code}, 1, 'dependency - HEADERS self - PROTOCOL_ERROR');
 
 # PRIORITY frame, weighted dependencies
@@ -442,5 +472,7 @@ is($frame->{length}, 81, 'exclusive dependency - first stream');
 
 ($frame) = grep { $_->{type} eq "DATA" && $_->{sid} == $sid3 } @$frames;
 is($frame->{length}, 81, 'exclusive dependency - last stream');
+
+}
 
 ###############################################################################

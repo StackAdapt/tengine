@@ -24,7 +24,8 @@ select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
 my $t = Test::Nginx->new()->has(qw/stream stream_map stream_ssl_preread/)
-	->has(qw/stream_ssl stream_return/)->has_daemon('openssl')
+	->has(qw/stream_ssl stream_return socket_ssl_alpn/)
+	->has_daemon('openssl')->plan(5)
 	->write_file_expand('nginx.conf', <<'EOF');
 
 %%TEST_GLOBALS%%
@@ -35,6 +36,8 @@ events {
 }
 
 stream {
+    %%TEST_GLOBALS_STREAM%%
+
     map $ssl_preread_alpn_protocols $name {
         ""       127.0.0.1:8093;
         default  $ssl_preread_alpn_protocols;
@@ -73,20 +76,9 @@ stream {
 
 EOF
 
-eval { require IO::Socket::SSL; die if $IO::Socket::SSL::VERSION < 1.56; };
-plan(skip_all => 'IO::Socket::SSL version >= 1.56 required') if $@;
-
-eval { IO::Socket::SSL->can_alpn() or die; };
-plan(skip_all => 'IO::Socket::SSL with OpenSSL ALPN support required') if $@;
-
-eval { exists &Net::SSLeay::P_alpn_selected or die; };
-plan(skip_all => 'Net::SSLeay with OpenSSL ALPN support required') if $@;
-
-$t->plan(5);
-
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]
@@ -122,25 +114,12 @@ get_ssl(8081, '');
 
 sub get_ssl {
 	my ($port, @alpn) = @_;
-	my $s = stream('127.0.0.1:' . port($port));
 
-	eval {
-		local $SIG{ALRM} = sub { die "timeout\n" };
-		local $SIG{PIPE} = sub { die "sigpipe\n" };
-		alarm(8);
-		IO::Socket::SSL->start_SSL($s->{_socket},
-			SSL_alpn_protocols => [ @alpn ],
-			SSL_verify_mode => IO::Socket::SSL::SSL_VERIFY_NONE(),
-			SSL_error_trap => sub { die $_[1] }
-		);
-		alarm(0);
-	};
-	alarm(0);
-
-	if ($@) {
-		log_in("died: $@");
-		return undef;
-	}
+	my $s = stream(
+		PeerAddr => '127.0.0.1:' . port($port),
+		SSL => 1,
+		SSL_alpn_protocols => [ @alpn ]
+	);
 
 	return $s->read();
 }

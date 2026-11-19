@@ -29,13 +29,9 @@ use Test::Nginx;
 select STDERR; $| = 1;
 select STDOUT; $| = 1;
 
-eval { require IO::Socket::SSL; };
-plan(skip_all => 'IO::Socket::SSL not installed') if $@;
-eval { IO::Socket::SSL::SSL_VERIFY_NONE(); };
-plan(skip_all => 'IO::Socket::SSL too old') if $@;
-
-my $t = Test::Nginx->new()->has(qw/http proxy http_ssl/)->has_daemon('openssl')
-	->write_file_expand('nginx.conf', <<'EOF')->plan(30);
+my $t = Test::Nginx->new()->has(qw/http proxy http_ssl socket_ssl/)
+	->has_daemon('openssl')
+	->write_file_expand('nginx.conf', <<'EOF')->plan(29);
 
 %%TEST_GLOBALS%%
 
@@ -72,7 +68,7 @@ EOF
 
 $t->write_file('openssl.conf', <<EOF);
 [ req ]
-default_bits = 1024
+default_bits = 2048
 encrypt_key = no
 distinguished_name = req_distinguished_name
 [ req_distinguished_name ]
@@ -155,7 +151,7 @@ undef $s;
 $s = upgrade_connect(noheader => 1);
 ok(!$s, "handshake noupgrade");
 
-# bytes sent on upgraded connection, fixed in c2f309fb7ad2 (1.7.11)
+# bytes sent on upgraded connection, fixed in c2c9a1c03 (1.7.11)
 # verify with 1) data actually read by client, 2) expected data from backend
 
 $t->stop();
@@ -164,7 +160,6 @@ open my $f, '<', "$d/cc.log" or die "Can't open cc.log: $!";
 
 is($f->getline(), shift (@r) . " 540793\n", 'log - bytes');
 is($f->getline(), shift (@r) . " 22\n", 'log - bytes pipelined');
-like($f->getline(), qr/\d+ 0\n/, 'log - bytes noupgrade');
 
 ###############################################################################
 

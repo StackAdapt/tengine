@@ -18,6 +18,9 @@
 #define ngx_http_perl_set_request(r, ctx)                                     \
                                                                               \
     ctx = INT2PTR(ngx_http_perl_ctx_t *, SvIV((SV *) SvRV(ST(0))));           \
+    if (ctx != ngx_http_perl_active_context || ctx == NULL) {                 \
+        croak("invalid request object");                                      \
+    }                                                                         \
     r = ctx->request
 
 
@@ -41,16 +44,6 @@ ngx_http_perl_sv2str(pTHX_ ngx_http_request_t *r, ngx_str_t *s, SV *sv)
     p = (u_char *) SvPV(sv, len);
 
     s->len = len;
-
-    if (SvREADONLY(sv) && SvPOK(sv)) {
-        s->data = p;
-
-        ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "perl sv2str: %08XD \"%V\"", sv->sv_flags, s);
-
-        return NGX_OK;
-    }
-
     s->data = ngx_pnalloc(r->pool, len);
     if (s->data == NULL) {
         return NGX_ERROR;
@@ -60,6 +53,29 @@ ngx_http_perl_sv2str(pTHX_ ngx_http_request_t *r, ngx_str_t *s, SV *sv)
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "perl sv2str: %08XD \"%V\"", sv->sv_flags, s);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_perl_refcount(pTHX_ ngx_http_request_t *r, SV *sv)
+{
+    ngx_pool_cleanup_t       *cln;
+    ngx_http_perl_cleanup_t  *clnp;
+
+    cln = ngx_pool_cleanup_add(r->pool, sizeof(ngx_http_perl_cleanup_t));
+    if (cln == NULL) {
+        return NGX_ERROR;
+    }
+
+    cln->handler = ngx_http_perl_refcount_cleanup;
+
+    clnp = cln->data;
+    clnp->request = r;
+    clnp->sv = sv;
+
+    SvREFCNT_inc(sv);
 
     return NGX_OK;
 }
@@ -269,10 +285,9 @@ header_in(r, key)
     u_char                     *p, *lowcase_key, *value, sep;
     STRLEN                      len;
     ssize_t                     size;
-    ngx_uint_t                  i, n, hash;
-    ngx_array_t                *a;
+    ngx_uint_t                  i, hash;
     ngx_list_part_t            *part;
-    ngx_table_elt_t            *h, **ph;
+    ngx_table_elt_t            *h, *header, **ph;
     ngx_http_header_t          *hh;
     ngx_http_core_main_conf_t  *cmcf;
 
@@ -302,77 +317,22 @@ header_in(r, key)
 
     if (hh) {
 
-        if (hh->offset == offsetof(ngx_http_headers_in_t, cookies)) {
+        if (hh->offset == offsetof(ngx_http_headers_in_t, cookie)) {
             sep = ';';
-            goto multi;
-        }
-#if (NGX_HTTP_X_FORWARDED_FOR)
-        if (hh->offset == offsetof(ngx_http_headers_in_t, x_forwarded_for)) {
+
+        } else {
             sep = ',';
-            goto multi;
         }
-#endif
 
         ph = (ngx_table_elt_t **) ((char *) &r->headers_in + hh->offset);
 
-        if (*ph) {
-            ngx_http_perl_set_targ((*ph)->value.data, (*ph)->value.len);
-
-            goto done;
-        }
-
-        XSRETURN_UNDEF;
-
-    multi:
-
-        /* Cookie, X-Forwarded-For */
-
-        a = (ngx_array_t *) ((char *) &r->headers_in + hh->offset);
-
-        n = a->nelts;
-
-        if (n == 0) {
-            XSRETURN_UNDEF;
-        }
-
-        ph = a->elts;
-
-        if (n == 1) {
-            ngx_http_perl_set_targ((*ph)->value.data, (*ph)->value.len);
-
-            goto done;
-        }
-
-        size = - (ssize_t) (sizeof("; ") - 1);
-
-        for (i = 0; i < n; i++) {
-            size += ph[i]->value.len + sizeof("; ") - 1;
-        }
-
-        value = ngx_pnalloc(r->pool, size);
-        if (value == NULL) {
-            ctx->error = 1;
-            croak("ngx_pnalloc() failed");
-        }
-
-        p = value;
-
-        for (i = 0; /* void */ ; i++) {
-            p = ngx_copy(p, ph[i]->value.data, ph[i]->value.len);
-
-            if (i == n - 1) {
-                break;
-            }
-
-            *p++ = sep; *p++ = ' ';
-        }
-
-        ngx_http_perl_set_targ(value, size);
-
-        goto done;
+        goto found;
     }
 
     /* iterate over all headers */
+
+    sep = ',';
+    ph = &header;
 
     part = &r->headers_in.headers.part;
     h = part->elts;
@@ -395,12 +355,49 @@ header_in(r, key)
             continue;
         }
 
-        ngx_http_perl_set_targ(h[i].value.data, h[i].value.len);
+        *ph = &h[i];
+        ph = &h[i].next;
+    }
 
+    *ph = NULL;
+    ph = &header;
+
+    found:
+
+    if (*ph == NULL) {
+        XSRETURN_UNDEF;
+    }
+
+    if ((*ph)->next == NULL) {
+        ngx_http_perl_set_targ((*ph)->value.data, (*ph)->value.len);
         goto done;
     }
 
-    XSRETURN_UNDEF;
+    size = - (ssize_t) (sizeof("; ") - 1);
+
+    for (h = *ph; h; h = h->next) {
+        size += h->value.len + sizeof("; ") - 1;
+    }
+
+    value = ngx_pnalloc(r->pool, size);
+    if (value == NULL) {
+        ctx->error = 1;
+        croak("ngx_pnalloc() failed");
+    }
+
+    p = value;
+
+    for (h = *ph; h; h = h->next) {
+        p = ngx_copy(p, h->value.data, h->value.len);
+
+        if (h->next == NULL) {
+            break;
+        }
+
+        *p++ = sep; *p++ = ' ';
+    }
+
+    ngx_http_perl_set_targ(value, size);
 
     done:
 
@@ -414,6 +411,7 @@ has_request_body(r, next)
     dXSTARG;
     ngx_http_request_t   *r;
     ngx_http_perl_ctx_t  *ctx;
+    SV                   *next;
     ngx_int_t             rc;
 
     ngx_http_perl_set_request(r, ctx);
@@ -430,7 +428,19 @@ has_request_body(r, next)
         XSRETURN_UNDEF;
     }
 
-    ctx->next = SvRV(ST(1));
+    next = ST(1);
+
+    if (!SvROK(next) || SvTYPE(SvRV(next)) != SVt_PVCV) {
+        croak("has_request_body(): no handler provided");
+    }
+
+    ctx->next = SvRV(next);
+
+    if (ngx_http_perl_refcount(aTHX_ r, ctx->next) != NGX_OK) {
+        ctx->error = 1;
+        ctx->next = NULL;
+        croak("ngx_http_perl_refcount() failed");
+    }
 
     r->request_body_in_single_buf = 1;
     r->request_body_in_persistent_file = 1;
@@ -591,6 +601,7 @@ header_out(r, key, value)
     }
 
     header->hash = 1;
+    header->next = NULL;
 
     if (ngx_http_perl_sv2str(aTHX_ r, &header->key, key) != NGX_OK) {
         header->hash = 0;
@@ -681,7 +692,7 @@ print(r, ...)
     if (items == 2) {
 
         /*
-         * do zero copy for prolate single read-only SV:
+         * single read-only SV:
          *     $r->print("some text\n");
          */
 
@@ -697,6 +708,11 @@ print(r, ...)
 
             if (len == 0) {
                 XSRETURN_EMPTY;
+            }
+
+            if (ngx_http_perl_refcount(aTHX_ r, sv) != NGX_OK) {
+                ctx->error = 1;
+                croak("ngx_http_perl_refcount() failed");
             }
 
             b = ngx_calloc_buf(r->pool);
@@ -1147,6 +1163,7 @@ sleep(r, sleep, next)
 
     ngx_http_request_t   *r;
     ngx_http_perl_ctx_t  *ctx;
+    SV                   *next;
     ngx_msec_t            sleep;
 
     ngx_http_perl_set_request(r, ctx);
@@ -1164,7 +1181,19 @@ sleep(r, sleep, next)
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "perl sleep: %M", sleep);
 
-    ctx->next = SvRV(ST(2));
+    next = ST(2);
+
+    if (!SvROK(next) || SvTYPE(SvRV(next)) != SVt_PVCV) {
+        croak("sleep(): no handler provided");
+    }
+
+    ctx->next = SvRV(next);
+
+    if (ngx_http_perl_refcount(aTHX_ r, ctx->next) != NGX_OK) {
+        ctx->error = 1;
+        ctx->next = NULL;
+        croak("ngx_http_perl_refcount() failed");
+    }
 
     r->connection->write->delayed = 1;
     ngx_add_timer(r->connection->write, sleep);

@@ -12,7 +12,9 @@ use strict;
 use base qw/ Exporter /;
 
 our @EXPORT = qw/ log_in log_out http http_get http_head port /;
-our @EXPORT_OK = qw/ http_gzip_request http_gzip_like http_start http_end /;
+our @EXPORT_OK = qw/
+	http_gzip_request http_gzip_like http_start http_end http_content
+/;
 our %EXPORT_TAGS = (
 	gzip => [ qw/ http_gzip_request http_gzip_like / ]
 );
@@ -121,6 +123,7 @@ sub has_module($) {
 			=> '--with-http_auth_request_module',
 		realip	=> '--with-http_realip_module',
 		sub	=> '--with-http_sub_module',
+		json	=> '--with-http_json_module',
 		charset	=> '(?s)^(?!.*--without-http_charset_module)',
 		gzip	=> '(?s)^(?!.*--without-http_gzip_module)',
 		ssi	=> '(?s)^(?!.*--without-http_ssi_module)',
@@ -155,20 +158,27 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-http_upstream_ip_hash_module)',
 		upstream_least_conn
 			=> '(?s)^(?!.*--without-http_upstream_least_conn_mod)',
+		upstream_least_time
+			=> '(?s)^(?!.*--without-http_upstream_least_time_mod)',
 		upstream_random
 			=> '(?s)^(?!.*--without-http_upstream_random_module)',
 		upstream_keepalive
-			=> '(?s)^(?!.*--without-http_upstream_keepalive_modu)',
+			=> '(?s)(?:--add-module=\S*ngx_http_upstream_keepalive_module|^(?!.*--without-http_upstream_keepalive_modu))',
 		upstream_zone
 			=> '(?s)^(?!.*--without-http_upstream_zone_module)',
+		upstream_sticky
+			=> '(?s)^(?!.*--without-http_upstream_sticky)',
 		http	=> '(?s)^(?!.*--without-http(?!\S))',
 		cache	=> '(?s)^(?!.*--without-http-cache)',
 		pop3	=> '(?s)^(?!.*--without-mail_pop3_module)',
 		imap	=> '(?s)^(?!.*--without-mail_imap_module)',
 		smtp	=> '(?s)^(?!.*--without-mail_smtp_module)',
 		pcre	=> '(?s)^(?!.*--without-pcre)',
+		control_api
+			=> '--with-control-api',
 		split_clients
 			=> '(?s)^(?!.*--without-http_split_clients_module)',
+		tunnel	=> '(?s)^(?!.*--without-http_tunnel_module)',
 		stream	=> '--with-stream((?!\S)|=dynamic)',
 		stream_access
 			=> '(?s)^(?!.*--without-stream_access_module)',
@@ -178,18 +188,22 @@ sub has_module($) {
 			=> '(?s)^(?!.*--without-stream_limit_conn_module)',
 		stream_map
 			=> '(?s)^(?!.*--without-stream_map_module)',
+		stream_pass
+			=> '(?s)^(?!.*--without-stream_pass_module)',
 		stream_return
 			=> '(?s)^(?!.*--without-stream_return_module)',
+		stream_set
+			=> '(?s)^(?!.*--without-stream_set_module)',
 		stream_split_clients
 			=> '(?s)^(?!.*--without-stream_split_clients_module)',
 		stream_ssl
 			=> '--with-stream_ssl_module',
-		stream_sni
-			=> '--with-stream_sni',
 		stream_upstream_hash
 			=> '(?s)^(?!.*--without-stream_upstream_hash_module)',
 		stream_upstream_least_conn
 			=> '(?s)^(?!.*--without-stream_upstream_least_conn_m)',
+		stream_upstream_least_time
+			=> '(?s)^(?!.*--without-stream_upstream_least_time_m)',
 		stream_upstream_random
 			=> '(?s)^(?!.*--without-stream_upstream_random_modul)',
 		stream_upstream_zone
@@ -239,6 +253,62 @@ sub has_feature($) {
 
 	if ($feature eq 'udp') {
 		return $^O ne 'MSWin32';
+	}
+
+	if ($feature =~ /^socket_ssl/) {
+		eval { require IO::Socket::SSL; };
+		return 0 if $@;
+		eval { IO::Socket::SSL::SSL_VERIFY_NONE(); };
+		return 0 if $@;
+		if ($feature eq 'socket_ssl') {
+			return 1;
+		}
+		if ($feature eq 'socket_ssl_sni') {
+			eval { IO::Socket::SSL->can_client_sni() or die; };
+			return !$@;
+		}
+		if ($feature eq 'socket_ssl_alpn') {
+			eval { IO::Socket::SSL->can_alpn() or die; };
+			return !$@;
+		}
+		if ($feature eq 'socket_ssl_sslversion') {
+			return IO::Socket::SSL->can('get_sslversion');
+		}
+		if ($feature eq 'socket_ssl_reused') {
+			return IO::Socket::SSL->can('get_session_reused');
+		}
+		return 0;
+	}
+
+	if ($feature =~ /^(openssl|libressl):([0-9.]+)([a-z]*)/) {
+		my $library = $1;
+		my $need = $2;
+		my $patch = $3;
+
+		$self->{_configure_args} = `$NGINX -V 2>&1`
+			if !defined $self->{_configure_args};
+
+		return 0 unless
+			$self->{_configure_args}
+			=~ /with $library ([0-9.]+)([a-z]*)/i;
+
+		my @v = (split(/\./, $1), unpack("C*", $2));
+		my ($n, $v);
+
+		for $n (split(/\./, $need), unpack("C*", $patch)) {
+			$v = shift @v || 0;
+			return 0 if $n > $v;
+			return 1 if $v > $n;
+		}
+
+		return 1;
+	}
+
+	if ($feature eq 'cryptx') {
+		eval { require Crypt::Misc; };
+		return 0 if $@;
+		eval { die if $Crypt::Misc::VERSION < 0.067; };
+		return !$@;
 	}
 
 	return 0;
@@ -297,11 +367,8 @@ sub try_run($$) {
 	return $self unless $@;
 
 	if ($ENV{TEST_NGINX_VERBOSE}) {
-		my $path = $self->{_configure_args} =~ m!--error-log-path=(\S+)!
-			? $1 : 'logs/error.log';
-		$path = "$self->{_testdir}/$path" if index($path, '/');
-
-		open F, '<', $path or die "Can't open $path: $!";
+		open F, '<', $self->{_testdir} . '/error.log'
+			or die "Can't open error.log: $!";
 		log_core($_) while (<F>);
 		close F;
 	}
@@ -343,7 +410,9 @@ sub run(;$) {
 		my @globals = $self->{_test_globals} ?
 			() : ('-g', "pid $testdir/nginx.pid; "
 			. "error_log $testdir/error.log debug;");
-		exec($NGINX, '-p', "$testdir/", '-c', 'nginx.conf', @globals),
+		my @args = @{$self->{_args} || []};
+		exec($NGINX, '-p', "$testdir/", '-c', 'nginx.conf',
+			'-e', 'error.log', @args, @globals)
 			or die "Unable to exec(): $!\n";
 	}
 
@@ -359,6 +428,12 @@ sub run(;$) {
 	}
 
 	$self->{_started} = 1;
+	return $self;
+}
+
+sub args {
+	my ($self, @args) = @_;
+	$self->{_args} = \@args;
 	return $self;
 }
 
@@ -416,7 +491,7 @@ sub dump_config() {
 		() : ('-g', "pid $testdir/nginx.pid; "
 		. "error_log $testdir/error.log debug;");
 	my $command = "$NGINX -T -p $testdir/ -c nginx.conf "
-		. join(' ', @globals);
+		. "-e error.log " . join(' ', @globals);
 
 	return qx/$command 2>&1/;
 }
@@ -470,7 +545,7 @@ sub reload() {
 			() : ('-g', "pid $testdir/nginx.pid; "
 			. "error_log $testdir/error.log debug;");
 		system($NGINX, '-p', $testdir, '-c', "nginx.conf",
-			'-s', 'reload', @globals) == 0
+			'-s', 'reload', '-e', 'error.log', @globals) == 0
 			or die "system() failed: $?\n";
 
 	} else {
@@ -493,14 +568,37 @@ sub stop() {
 			() : ('-g', "pid $testdir/nginx.pid; "
 			. "error_log $testdir/error.log debug;");
 		system($NGINX, '-p', $testdir, '-c', "nginx.conf",
-			'-s', 'stop', @globals) == 0
+			'-s', 'quit', '-e', 'error.log', @globals) == 0
 			or die "system() failed: $?\n";
 
 	} else {
 		kill 'QUIT', $pid;
 	}
 
-	waitpid($pid, 0);
+	my $exited;
+
+	for (1 .. 900) {
+		$exited = waitpid($pid, WNOHANG) != 0;
+		last if $exited;
+		select undef, undef, undef, 0.1;
+	}
+
+	if (!$exited) {
+		if ($^O eq 'MSWin32') {
+			my $testdir = $self->{_testdir};
+			my @globals = $self->{_test_globals} ?
+				() : ('-g', "pid $testdir/nginx.pid; "
+				. "error_log $testdir/error.log debug;");
+			system($NGINX, '-p', $testdir, '-c', "nginx.conf",
+				'-s', 'stop', '-e', 'error.log', @globals) == 0
+				or die "system() failed: $?\n";
+
+		} else {
+			kill 'TERM', $pid;
+		}
+
+		waitpid($pid, 0);
+	}
 
 	$self->{_started} = 0;
 
@@ -513,7 +611,19 @@ sub stop_daemons() {
 	while ($self->{_daemons} && scalar @{$self->{_daemons}}) {
 		my $p = shift @{$self->{_daemons}};
 		kill $^O eq 'MSWin32' ? 9 : 'TERM', $p;
-		waitpid($p, 0);
+
+		my $exited;
+
+		for (1 .. 50) {
+			$exited = waitpid($p, WNOHANG) != 0;
+			last if $exited;
+			select undef, undef, undef, 0.1;
+		}
+
+		if (!$exited) {
+			kill $^O eq 'MSWin32' ? 9 : 'TERM', $p;
+			waitpid($p, 0);
+		}
 	}
 
 	return $self;
@@ -548,6 +658,7 @@ sub write_file_expand($$) {
 
 	$content =~ s/%%TEST_GLOBALS%%/$self->test_globals()/gmse;
 	$content =~ s/%%TEST_GLOBALS_HTTP%%/$self->test_globals_http()/gmse;
+	$content =~ s/%%TEST_GLOBALS_STREAM%%/$self->test_globals_stream()/gmse;
 	$content =~ s/%%TESTDIR%%/$self->{_testdir}/gms;
 
 	$content =~ s/127\.0\.0\.1:(8\d\d\d)/'127.0.0.1:' . port($1)/gmse;
@@ -670,6 +781,8 @@ sub test_globals_http() {
 	$s .= "root $self->{_testdir};\n";
 	$s .= "access_log $self->{_testdir}/access.log;\n";
 	$s .= "client_body_temp_path $self->{_testdir}/client_body_temp;\n";
+	$s .= "lua_package_path \"/usr/local/lib/lua/?.lua;;\";\n"
+		if $self->has_module('lua');
 
 	$s .= "fastcgi_temp_path $self->{_testdir}/fastcgi_temp;\n"
 		if $self->has_module('fastcgi');
@@ -687,6 +800,20 @@ sub test_globals_http() {
 		if $ENV{TEST_NGINX_GLOBALS_HTTP};
 
 	$self->{_test_globals_http} = $s;
+}
+
+sub test_globals_stream() {
+	my ($self) = @_;
+
+	return $self->{_test_globals_stream}
+		if defined $self->{_test_globals_stream};
+
+	my $s = '';
+
+	$s .= $ENV{TEST_NGINX_GLOBALS_STREAM}
+		if $ENV{TEST_NGINX_GLOBALS_STREAM};
+
+	$self->{_test_globals_stream} = $s;
 }
 
 ###############################################################################
@@ -743,12 +870,14 @@ sub http($;%) {
 	my $s = http_start($request, %extra);
 
 	return $s if $extra{start} or !defined $s;
-	return http_end($s);
+	return http_end($s, %extra);
 }
 
 sub http_start($;%) {
 	my ($request, %extra) = @_;
 	my $s;
+
+	my $port = $extra{SSL} ? 8443 : 8080;
 
 	eval {
 		local $SIG{ALRM} = sub { die "timeout\n" };
@@ -757,9 +886,27 @@ sub http_start($;%) {
 
 		$s = $extra{socket} || IO::Socket::INET->new(
 			Proto => 'tcp',
-			PeerAddr => '127.0.0.1:' . port(8080)
+			PeerAddr => '127.0.0.1:' . port($port),
+			%extra
 		)
 			or die "Can't connect to nginx: $!\n";
+
+		if ($extra{SSL}) {
+			require IO::Socket::SSL;
+			IO::Socket::SSL->start_SSL(
+				$s,
+				SSL_verify_mode =>
+					IO::Socket::SSL::SSL_VERIFY_NONE(),
+				%extra
+			)
+				or die $IO::Socket::SSL::SSL_ERROR . "\n";
+
+			if (!defined $extra{SSL_startHandshake}) {
+				log_in("ssl cipher: " . $s->get_cipher());
+				log_in("ssl cert: "
+					. $s->peer_certificate('issuer'));
+			}
+		}
 
 		log_out($request);
 		$s->print($request);
@@ -794,6 +941,8 @@ sub http_end($;%) {
 
 		local $/;
 		$reply = $s->getline();
+
+		$s->close();
 
 		alarm(0);
 	};
@@ -836,10 +985,16 @@ sub http_content {
 	}
 
 	my $content = '';
+	my $len = -1;
+
 	while ($body =~ /\G\x0d?\x0a?([0-9a-f]+)\x0d\x0a?/gcmsi) {
-		my $len = hex($1);
+		$len = hex($1);
 		$content .= substr($body, pos($body), $len);
 		pos($body) += $len;
+	}
+
+	if ($len != 0) {
+		$content .= '[no-last-chunk]';
 	}
 
 	return $content;

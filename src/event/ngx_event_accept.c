@@ -11,9 +11,10 @@
 
 
 static ngx_int_t ngx_disable_accept_events(ngx_cycle_t *cycle, ngx_uint_t all);
-#if (!T_NGX_ACCEPT_FILTER)
-static void ngx_close_accepted_connection(ngx_connection_t *c);
+#if (NGX_HAVE_EPOLLEXCLUSIVE)
+static void ngx_reorder_accept_events(ngx_listening_t *ls);
 #endif
+static void ngx_close_accepted_connection(ngx_connection_t *c);
 
 
 void
@@ -179,28 +180,31 @@ ngx_event_accept(ngx_event_t *ev)
             return;
         }
 
-        /* set a blocking mode for iocp and non-blocking mode for others */
-
-        if (ngx_inherited_nonblocking) {
-            if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
-                if (ngx_blocking(s) == -1) {
-                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                  ngx_blocking_n " failed");
-                    ngx_close_accepted_connection(c);
-                    return;
-                }
-            }
-
-        } else {
-            if (!(ngx_event_flags & NGX_USE_IOCP_EVENT)) {
-                if (ngx_nonblocking(s) == -1) {
-                    ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
-                                  ngx_nonblocking_n " failed");
-                    ngx_close_accepted_connection(c);
-                    return;
-                }
+        if (!ngx_inherited_nonblocking) {
+            if (ngx_nonblocking(s) == -1) {
+                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                              ngx_nonblocking_n " failed");
+                ngx_close_accepted_connection(c);
+                return;
             }
         }
+
+#if (NGX_HAVE_KEEPALIVE_TUNABLE && NGX_DARWIN)
+
+        /* Darwin doesn't inherit TCP_KEEPALIVE from a listening socket */
+
+        if (ls->keepidle) {
+            if (setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE,
+                           (const void *) &ls->keepidle, sizeof(int))
+                == -1)
+            {
+                ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_socket_errno,
+                              "setsockopt(TCP_KEEPALIVE, %d) failed, ignored",
+                              ls->keepidle);
+            }
+        }
+
+#endif
 
         *log = ls->log;
 
@@ -233,10 +237,6 @@ ngx_event_accept(ngx_event_t *ev)
 
         wev->ready = 1;
 
-        if (ngx_event_flags & NGX_USE_IOCP_EVENT) {
-            rev->ready = 1;
-        }
-
         if (ev->deferred_accept) {
             rev->ready = 1;
 #if (NGX_HAVE_KQUEUE || NGX_HAVE_EPOLLRDHUP)
@@ -260,6 +260,8 @@ ngx_event_accept(ngx_event_t *ev)
          */
 
         c->number = ngx_atomic_fetch_add(ngx_connection_counter, 1);
+
+        c->start_time = ngx_current_msec;
 
 #if (NGX_STAT_STUB)
         (void) ngx_atomic_fetch_add(ngx_stat_handled, 1);
@@ -333,6 +335,10 @@ ngx_event_accept(ngx_event_t *ev)
         }
 
     } while (ev->available);
+
+#if (NGX_HAVE_EPOLLEXCLUSIVE)
+    ngx_reorder_accept_events(ls);
+#endif
 }
 
 
@@ -409,6 +415,16 @@ ngx_disable_accept_events(ngx_cycle_t *cycle, ngx_uint_t all)
     ls = cycle->listening.elts;
     for (i = 0; i < cycle->listening.nelts; i++) {
 
+#if (T_NGX_HAVE_XUDP)
+        if (ls[i].for_xudp) {
+            /*
+             * do not disable xudp sockets
+             * closes the xudp sockets, xudp will not process data anymore
+             */
+            continue;
+        }
+#endif
+
         c = ls[i].connection;
 
         if (c == NULL || !c->read->active) {
@@ -447,10 +463,58 @@ ngx_disable_accept_events(ngx_cycle_t *cycle, ngx_uint_t all)
 }
 
 
-#if (!T_NGX_ACCEPT_FILTER)
-static
+#if (NGX_HAVE_EPOLLEXCLUSIVE)
+
+static void
+ngx_reorder_accept_events(ngx_listening_t *ls)
+{
+    ngx_connection_t  *c;
+
+    /*
+     * Linux with EPOLLEXCLUSIVE usually notifies only the process which
+     * was first to add the listening socket to the epoll instance.  As
+     * a result most of the connections are handled by the first worker
+     * process.  To fix this, we re-add the socket periodically, so other
+     * workers will get a chance to accept connections.
+     */
+
+    if (!ngx_use_exclusive_accept) {
+        return;
+    }
+
+#if (NGX_HAVE_REUSEPORT)
+
+    if (ls->reuseport) {
+        return;
+    }
+
 #endif
-void
+
+    c = ls->connection;
+
+    if (c->requests++ % 16 != 0
+        && ngx_accept_disabled <= 0)
+    {
+        return;
+    }
+
+    if (ngx_del_event(c->read, NGX_READ_EVENT, NGX_DISABLE_EVENT)
+        == NGX_ERROR)
+    {
+        return;
+    }
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, NGX_EXCLUSIVE_EVENT)
+        == NGX_ERROR)
+    {
+        return;
+    }
+}
+
+#endif
+
+
+static void
 ngx_close_accepted_connection(ngx_connection_t *c)
 {
     ngx_socket_t  fd;

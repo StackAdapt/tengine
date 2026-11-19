@@ -37,14 +37,14 @@ http {
     %%TEST_GLOBALS_HTTP%%
 
     server {
-        listen       127.0.0.1:8080 http2;
+        listen       127.0.0.1:8080;
         server_name  localhost;
+
+        http2 on;
 
         location / {
             add_trailer X-Var $host;
         }
-
-        http2_max_field_size 256k;
 
         location /continuation {
             # many trailers to send in parts
@@ -108,7 +108,7 @@ is($frame->{flags}, 5, 'no data - trailer flags');
 # CONTINUATION in response trailers
 
 $s = Test::Nginx::HTTP2->new();
-$sid = $s->new_stream({ path => '/continuation?h=' . 'x' x 2**12 });
+$sid = $s->new_stream({ path => '/continuation?h=' . 'x' x 4000 });
 $frames = $s->read(all => [{ sid => $sid, type => 'CONTINUATION' }]);
 @$frames = grep { $_->{type} =~ "HEADERS|CONTINUATION|DATA" } @$frames;
 
