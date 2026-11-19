@@ -853,7 +853,7 @@ ngx_http_v3_priority(ngx_http_request_t *r, ngx_http_v3_header_t *header,
     if (ret != NGX_OK) {
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                       "|xquic|xqc_parse_http_priority error|value:%*s|",
-                      header->value.data, header->value.len);
+                      header->value.len, header->value.data);
         return NGX_ERROR; 
     }
 
@@ -861,7 +861,7 @@ ngx_http_v3_priority(ngx_http_request_t *r, ngx_http_v3_header_t *header,
     if (ret != NGX_OK) {
         ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
                       "|xquic|xqc_h3_request_set_priority error|value:%*s|",
-                      header->value.data, header->value.len);
+                      header->value.len, header->value.data);
         return NGX_ERROR; 
     }
 
